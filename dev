@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+
+nix-shell etc/shell.nix --run 'fish -C "function fish_prompt; set_color green; echo -n \"(nix) \"; set_color blue; echo -n (prompt_pwd); set_color white; printf \" (%s)\" (git branch --show-current 2>/dev/null); set_color normal; echo \" > \"; end"'
+
