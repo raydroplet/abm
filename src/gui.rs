@@ -1,42 +1,65 @@
+// gui.rs
+pub use crossbeam_channel as crossbeam;
 pub use eframe::egui;
 
-pub use std::sync::mpsc;
-use std::thread;
-
-pub struct Engine {
-    age: u64,
+struct Engine {
+    value: u64,
 }
 
 impl Engine {
-    pub fn new(frame_sender: mpsc::SyncSender<u8>) -> Self {
-        // explicty types because i'm still learning
-        // let (tx, rx): (mpsc::SyncSender<u8>, mpsc::Receiver<u8>)  = mpsc::sync_channel(1);
+    pub fn new() -> Self {
+        Self { value: 0 }
+    }
 
-        std::thread::spawn(move || {
-            self.tick();
-            let pixels = self.generate_frame(320, 240);
+    pub fn tick(&mut self) {
+        self.value += 1;
+    }
 
-            // match transmitter.try_send(pixels) {
-            //     Ok(_) => {}
-            //     Err(_) => {}
-            // }
+    /// Generates a dummy "World Grid" (Noise) for demo purposes
+    fn generate_frame(&self, mut frame: FrameData) {
+        for i in 0..(frame.width * frame.height) {
+            // Simple animated pattern based on index and age
+            let val = ((i as u64 + self.value) % 255) as u8;
+            frame
+                .pixels
+                .extend_from_slice(&[val, val / 2, 255 - val, 255]); // R, G, B, A
+        }
+    }
+}
+
+pub struct Producer {
+    returner: crossbeam::Sender<FrameData>,
+    receiver: crossbeam::Receiver<FrameData>,
+}
+
+impl Producer {
+    pub fn new(
+        engine: Engine,
+        engine_receiver: crossbeam::Receiver<FrameData>,
+        engine_returner: crossbeam::Sender<FrameData>,
+    ) -> Self {
+        // spawns the engine thread loop
+        std::thread::spawn(|| {
+            let mut engine = engine;
+
+            loop {
+                engine.tick();
+            }
         });
-        Self { age: 0 }
+
+        Self {
+            returner: engine_returner,
+            receiver: engine_receiver,
+        }
     }
 
     fn tick(&self) {}
+}
 
-    /// Generates a dummy "World Grid" (Noise) for demo purposes
-    fn generate_frame(&self, width: usize, height: usize) -> egui::ColorImage {
-        let mut pixels = Vec::with_capacity(width * height * 4);
-        for i in 0..(width * height) {
-            // Simple animated pattern based on index and age
-            let val = ((i as u64 + self.age) % 255) as u8;
-            pixels.extend_from_slice(&[val, val / 2, 255 - val, 255]); // R, G, B, A
-        }
-
-        egui::ColorImage::from_rgba_unmultiplied([width, height], &pixels)
-    }
+pub struct FrameData {
+    width: usize,
+    height: usize,
+    pixels: Vec<u8>,
 }
 
 // Small wrapper for the eframe::App trait
@@ -46,14 +69,20 @@ impl Engine {
 //
 pub struct Presenter {
     texture: Option<egui::TextureHandle>,
-    receiver: mpsc::Receiver<egui::ColorImage>,
+    frame_receiver: crossbeam::Receiver<FrameData>,
+    frame_returner: crossbeam::Sender<FrameData>,
 }
 
 impl Presenter {
-    pub fn new(_cc: &eframe::CreationContext<'_>, frame_receiver: mpsc::Receiver<u8>) -> Self {
+    pub fn new(
+        _cc: &eframe::CreationContext<'_>,
+        frame_receiver: crossbeam::Receiver<FrameData>,
+        frame_returner: crossbeam::Sender<FrameData>,
+    ) -> Self {
         Self {
             texture: None,
-            receiver: frame_receiver,
+            frame_receiver: frame_receiver,
+            frame_returner: frame_returner,
         }
     }
 }
@@ -61,33 +90,37 @@ impl Presenter {
 impl eframe::App for Presenter {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            // retrieve the frame
-            if let Ok(frame) = self.receiver.try_recv() {}
+            // 1. Drain the channel to get the LATEST frame
+            // We loop so we skip any old frames that piled up (lag reduction)
+            let mut latest_frame = None;
+            while let Ok(frame) = self.frame_receiver.try_recv() {
+                // If we skipped a frame, return it immediately to be reused!
+                if let Some(skipped) = latest_frame {
+                    let _ = self.frame_returner.send(skipped);
+                }
+                latest_frame = Some(frame);
+            }
 
-            // Load the texture into the GPU.
-            // "texture" is a handle. If we reuse the name, it updates the existing one.
-            self.texture = Some(ctx.load_texture(
-                "world_display",
-                //
-                // TODO: the question now becomes should I send the
-                // egui::ColorImageor just the Vec<u8 something> pixels?
-                //
-                // The engine class should have nothing to do with egui
-                // so the best answer looks like the raw pixels,
-                // but what about width/height?
-                //
-                frame,
-                egui::TextureOptions::NEAREST, // NEAREST = Sharp pixels (Retro style)
-            ));
+            // 2. If we got a new frame, update texture AND recycle
+            if let Some(frame) = latest_frame {
+                // Create/Update Texture
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [frame.width, frame.height],
+                    &frame.pixels,
+                );
 
-            // 2. Draw the texture scaling to fill the available space
+                self.texture =
+                    Some(ctx.load_texture("display", image, egui::TextureOptions::NEAREST));
+
+                // RETURN THE BOTTLE!
+                let _ = self.frame_returner.send(frame);
+            }
+
+            // 3. Draw existing texture (even if we didn't get a new frame this specific tick)
             if let Some(texture) = &self.texture {
                 ui.image(texture);
             }
 
-            // CRITICAL: Request a repaint immediately.
-            // Default behavior is to wait for mouse movement.
-            // For a game/simulation, we want 60 FPS.
             ctx.request_repaint();
         });
     }
