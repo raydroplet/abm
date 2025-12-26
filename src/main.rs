@@ -1,30 +1,26 @@
 // main.rs
 mod gui;
-use gui::{Presenter, egui, crossbeam};
+mod engine;
+
+use gui::{Presenter, Producer, crossbeam};
+use crate::engine::{Engine};
 
 fn main() -> eframe::Result<()> {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([800.0, 600.0])
-            .with_resizable(false),
-        run_and_return: false,
-        ..Default::default()
-    };
+    // 1. Channels (Capacity 2 is a sweet spot for double buffering)
+    // - producer_tx: Engine fills this
+    // - presenter_rx: Presenter reads this
+    let (producer_tx, presenter_rx) = crossbeam::bounded(2);
 
-    let (presenter_sender, engine_returner) = crossbeam::bounded(1);
-    let (engine_sender, presenter_returner) = crossbeam::bounded(1);
+    // - presenter_tx: Presenter fills this (with empty frames)
+    // - producer_rx: Engine reads this
+    let (presenter_tx, producer_rx) = crossbeam::bounded(2);
 
-    // Launch the app
-    eframe::run_native(
-        "Phase 1: Prototype",
-        options,
-        // TODO: figure out this double box api callback syntax choice fully
-        Box::new(|context| {
-            Ok(Box::new(Presenter::new(
-                context,
-                presenter_returner,
-                presenter_sender,
-            )))
-        }),
-    )
+    // 2. Setup Classes
+    let engine = Engine::new();
+    let producer = Producer::new(producer_rx, producer_tx);
+    let presenter = Presenter::new(presenter_rx, presenter_tx);
+
+    // 3. Execution
+    producer.run_thread(engine); // Spawns background thread
+    presenter.run() // Blocks main thread until window closes
 }
