@@ -1,25 +1,44 @@
 // engine.rs
 
+use hecs::World;
 use std::thread;
 use std::time::Instant;
-use hecs::World;
 
 pub struct Engine {
-    value: f32,
-    world: World,
-    last_update: Instant,
+    dummy_background_value: f32,
+    world: World,         // entity component system
+    last_update: Instant, // used for delta_time calculation
+    //
+    debug_info: DebugInfo,
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct DebugInfo {
+    pub delta_time: f32,     // The time passed in the game world (e.g. 0.016)
+    pub update_time_ms: f32, // How long physics took (e.g. 1.2ms)
+    // pub render_time_ms: f32, // How long drawing took (e.g. 12.5ms)
+    pub agent_count: usize,  // Useful since you are using ECS
 }
 
 pub struct FrameData {
     pub width: usize,
     pub height: usize,
     pub pixels: Vec<u8>,
+    pub debug_info: DebugInfo,
 }
 
 // --- Components (The Data) ---
-pub struct Position { pub x: f32, pub y: f32 }
-pub struct Velocity { pub x: f32, pub y: f32 }
-pub struct AgentSize { pub radius: f32 }
+pub struct Position {
+    pub x: f32,
+    pub y: f32,
+}
+pub struct Velocity {
+    pub x: f32,
+    pub y: f32,
+}
+pub struct AgentSize {
+    pub radius: f32,
+}
 
 impl Engine {
     pub fn new() -> Self {
@@ -33,25 +52,26 @@ impl Engine {
         ));
 
         Self {
-            value: 0.0,
+            dummy_background_value: 0.0,
             world: world,
             last_update: Instant::now(),
+            debug_info: DebugInfo::default(),
         }
     }
 
     pub fn tick(&mut self) {
         // 1. Get current time
-        let now = Instant::now();
+        let start_update = Instant::now();
 
         // 2. Calculate difference (Delta Time) in seconds
-        let dt = now.duration_since(self.last_update).as_secs_f32();
+        let dt = start_update.duration_since(self.last_update).as_secs_f32();
 
         // 3. Reset the clock for the next tick
-        self.last_update = now;
+        self.last_update = start_update;
 
         // 4. Use dt
         // Example: Move at 60.0 units per second
-        self.value += 60.0 * dt;
+        self.dummy_background_value += 60.0 * dt;
 
         // SYSTEM: Movement
         // This replaces your hardcoded "self.value += ..."
@@ -59,34 +79,53 @@ impl Engine {
         for (_id, (pos, vel)) in self.world.query_mut::<(&mut Position, &mut Velocity)>() {
             pos.x += vel.x * dt;
             pos.y += vel.y * dt;
-            
+
             // (Optional) Wrap around screen for the "Ant Farm" feel
             // In Phase 0.3, this would be collision with the Field
-            if pos.x > 800.0 || pos.x < 0.0 { vel.x *= -1.0; } 
-            if pos.y > 600.0 || pos.y < 0.0 { vel.y *= -1.0; }
+            if pos.x > 1024.0 || pos.x < 0.0 {
+                vel.x *= -1.0;
+            }
+            if pos.y > 768.0 || pos.y < 0.0 {
+                vel.y *= -1.0;
+            }
         }
 
-        thread::sleep(std::time::Duration::from_millis(10)); // avoid the current 100% cpu
+        self.debug_info.delta_time = dt;
+        self.debug_info.update_time_ms = start_update.elapsed().as_secs_f32() * 1000.0;
+        // thread::sleep(std::time::Duration::from_millis(10)); // avoid the current 100% cpu
     }
 
     pub fn render(&self, frame: &mut FrameData) {
+        // let start_render = Instant::now();
+
         // Sanity check to ensure buffer is big enough (resizes only if screen size changed)
         let required_size = frame.width * frame.height * 4;
         if frame.pixels.len() != required_size {
-            println!("resize happened: {} -> {}", frame.pixels.len(), required_size);
+            println!(
+                "resize happened: {} -> {}",
+                frame.pixels.len(),
+                required_size
+            );
             frame.pixels.resize(required_size, 0);
         }
 
         // 2. Render the Eulerian Grid (Your background/fields)
         // dummy_image_checkerboard(&mut frame.pixels, frame.width, self.value);
         frame.pixels.fill(0);
-        
+
         // 3. Render the Lagrangian Agents (The ECS Entities)
         // We query purely for read access here
         for (_id, (pos, size)) in &mut self.world.query::<(&Position, &AgentSize)>() {
             // Simple rasterization of a circle/square at pos.x/y
             render_agent(frame, pos, size);
         }
+
+        // 4. Debug info
+        // Store in FrameData to send to UI
+        frame.debug_info.delta_time = self.debug_info.delta_time;
+        frame.debug_info.update_time_ms = self.debug_info.update_time_ms; // Copy from tick
+        // frame.debug_info.render_time_ms = start_render.elapsed().as_secs_f32() * 1000.0;
+        frame.debug_info.agent_count = self.world.len() as usize;
     }
 }
 
@@ -96,7 +135,7 @@ fn render_agent(frame: &mut FrameData, pos: &Position, size: &AgentSize) {
     let center_y = pos.y as isize;
     let r = size.radius as isize;
     let width = frame.width as isize;
-    
+
     // Naive box drawing for prototype
     for y in (center_y - r)..=(center_y + r) {
         for x in (center_x - r)..=(center_x + r) {
@@ -104,9 +143,9 @@ fn render_agent(frame: &mut FrameData, pos: &Position, size: &AgentSize) {
                 let idx = ((y * width + x) * 4) as usize;
                 // Draw Green Agent
                 frame.pixels[idx] = 0;
-                frame.pixels[idx+1] = 255;
-                frame.pixels[idx+2] = 0;
-                frame.pixels[idx+3] = 255;
+                frame.pixels[idx + 1] = 255;
+                frame.pixels[idx + 2] = 0;
+                frame.pixels[idx + 3] = 255;
             }
         }
     }
@@ -114,15 +153,17 @@ fn render_agent(frame: &mut FrameData, pos: &Position, size: &AgentSize) {
 
 ////////
 
-fn dummy_image_checkerboard(pixels: &mut Vec<u8>, width: usize, value: f32) {
-    if width == 0 { return; } // Prevent division by zero panic
+fn _dummy_image_checkerboard(pixels: &mut Vec<u8>, width: usize, value: f32) {
+    if width == 0 {
+        return;
+    } // Prevent division by zero panic
 
     // CONFIGURATION
     // ----------------------
-    let block_log2 = 5;      // 2^6 = 64 pixels per square (Larger = less flickering)
-    let speed = 0.25;        // Pixels per second (Lower = smoother)
-    
-    // Calculate offset. We wrap it (%) by a large power of 2 to prevent 
+    let block_log2 = 5; // 2^6 = 64 pixels per square (Larger = less flickering)
+    let speed = 0.25; // Pixels per second (Lower = smoother)
+
+    // Calculate offset. We wrap it (%) by a large power of 2 to prevent
     // the float from losing precision if the app runs for hours.
     // 4096 is just an arbitrary large multiple of our block size.
     let scroll = (value * speed) as usize % 4096;
@@ -141,9 +182,15 @@ fn dummy_image_checkerboard(pixels: &mut Vec<u8>, width: usize, value: f32) {
         let is_white = ((dx >> block_log2) ^ (dy >> block_log2)) & 1 == 1;
 
         if is_white {
-            pixel[0] = 160; pixel[1] = 160; pixel[2] = 160; pixel[3] = 255;
+            pixel[0] = 160;
+            pixel[1] = 160;
+            pixel[2] = 160;
+            pixel[3] = 255;
         } else {
-            pixel[0] = 40;  pixel[1] = 40;  pixel[2] = 40;  pixel[3] = 255;
+            pixel[0] = 40;
+            pixel[1] = 40;
+            pixel[2] = 40;
+            pixel[3] = 255;
         }
     }
 }
