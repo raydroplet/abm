@@ -29,7 +29,6 @@ impl Producer {
 
                 match self.receiver.try_recv() {
                     Ok(mut frame) => {
-                        println!("Engine: Rendering frame..."); // <--- CHECK THIS
                         // A buffer is available! We can render.
                         engine.render(&mut frame);
 
