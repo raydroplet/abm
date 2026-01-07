@@ -4,20 +4,21 @@ use hecs::World;
 use std::thread;
 use std::time::Instant;
 
+const FIXED_DT: f32 = 1.0 / 60.0; // Run physics exactly 60 times a second
+//
 pub struct Engine {
     dummy_background_value: f32,
     world: World,         // entity component system
     last_update: Instant, // used for delta_time calculation
     //
-    debug_info: DebugInfo,
+    tick_counter: u64, // overflows in ~584,000 years at 1.000.000hz
+    time_accumulator: f32, //
 }
 
 #[derive(Default, Clone, Copy)]
 pub struct DebugInfo {
-    pub delta_time: f32,     // The time passed in the game world (e.g. 0.016)
-    pub update_time_ms: f32, // How long physics took (e.g. 1.2ms)
-    // pub render_time_ms: f32, // How long drawing took (e.g. 12.5ms)
-    pub agent_count: usize,  // Useful since you are using ECS
+    pub tick_counter: u64,  // overflows in ~584,000 years at 1.000.000hz
+    pub agent_count: usize, // Useful since you are using ECS
 }
 
 pub struct FrameData {
@@ -55,7 +56,8 @@ impl Engine {
             dummy_background_value: 0.0,
             world: world,
             last_update: Instant::now(),
-            debug_info: DebugInfo::default(),
+            tick_counter: 0,
+            time_accumulator: 0.0,
         }
     }
 
@@ -64,21 +66,20 @@ impl Engine {
         let start_update = Instant::now();
 
         // 2. Calculate difference (Delta Time) in seconds
-        let dt = start_update.duration_since(self.last_update).as_secs_f32();
+        let delta_time = start_update.duration_since(self.last_update).as_secs_f32();
 
         // 3. Reset the clock for the next tick
         self.last_update = start_update;
 
         // 4. Use dt
         // Example: Move at 60.0 units per second
-        self.dummy_background_value += 60.0 * dt;
+        self.dummy_background_value += 60.0 * delta_time;
 
-        // SYSTEM: Movement
-        // This replaces your hardcoded "self.value += ..."
+        // Agents Movement
         // We query for everything that has a Position AND Velocity
         for (_id, (pos, vel)) in self.world.query_mut::<(&mut Position, &mut Velocity)>() {
-            pos.x += vel.x * dt;
-            pos.y += vel.y * dt;
+            pos.x += vel.x * delta_time;
+            pos.y += vel.y * delta_time;
 
             // (Optional) Wrap around screen for the "Ant Farm" feel
             // In Phase 0.3, this would be collision with the Field
@@ -88,11 +89,19 @@ impl Engine {
             if pos.y > 768.0 || pos.y < 0.0 {
                 vel.y *= -1.0;
             }
-        }
+        };
 
-        self.debug_info.delta_time = dt;
-        self.debug_info.update_time_ms = start_update.elapsed().as_secs_f32() * 1000.0;
-        // thread::sleep(std::time::Duration::from_millis(10)); // avoid the current 100% cpu
+        // Add to the "bank" of time we need to simulate
+        self.time_accumulator += delta_time;
+
+        // --- SPEED LIMIT ---
+        // This loop ONLY runs if 16ms have passed.
+        // If accumulator is 0.0001 (fast CPU), this loop is skipped entirely.
+        while self.time_accumulator >= FIXED_DT {
+            // ... Physics Logic ...
+            self.tick_counter += 1; // Count UPS only here
+            self.time_accumulator -= FIXED_DT;
+        }
     }
 
     pub fn render(&self, frame: &mut FrameData) {
@@ -122,9 +131,7 @@ impl Engine {
 
         // 4. Debug info
         // Store in FrameData to send to UI
-        frame.debug_info.delta_time = self.debug_info.delta_time;
-        frame.debug_info.update_time_ms = self.debug_info.update_time_ms; // Copy from tick
-        // frame.debug_info.render_time_ms = start_render.elapsed().as_secs_f32() * 1000.0;
+        frame.debug_info.tick_counter = self.tick_counter;
         frame.debug_info.agent_count = self.world.len() as usize;
     }
 }

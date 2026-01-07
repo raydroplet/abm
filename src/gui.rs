@@ -1,6 +1,6 @@
 // gui.rs
 
-use crate::engine::{Engine, FrameData, DebugInfo};
+use crate::engine::{DebugInfo, Engine, FrameData};
 pub use crossbeam_channel as crossbeam;
 pub use eframe::egui;
 use std::thread;
@@ -61,7 +61,13 @@ pub struct Presenter {
     receiver: crossbeam::Receiver<FrameData>,
     returner: crossbeam::Sender<FrameData>,
     texture: Option<egui::TextureHandle>,
-    debug_info: DebugInfo,
+    //
+    latest_debug_info: DebugInfo,
+    //
+    // UPS (Physics) Smoothing
+    last_tick_count: u64,   // Snapshot of total ticks 0.5s ago
+    last_measure_time: f64, // Timestamp of the last check
+    display_ups: u64,
 }
 
 impl Presenter {
@@ -73,7 +79,12 @@ impl Presenter {
             receiver: frame_receiver,
             returner: frame_returner,
             texture: None,
-            debug_info: DebugInfo::default(),
+            //
+            latest_debug_info: DebugInfo::default(),
+            //
+            last_tick_count: 0,
+            last_measure_time: 0.0,
+            display_ups: 0,
         }
     }
 
@@ -141,10 +152,27 @@ impl eframe::App for Presenter {
             };
 
             // debug info
-            self.debug_info = frame.debug_info;
+            self.latest_debug_info = frame.debug_info;
 
             // Recycle...
             let _ = self.returner.send(frame);
+        }
+
+        // Calculate Physics UPS (Snapshot Delta)
+        let time = ctx.input(|i| i.time);
+        if time - self.last_measure_time >= 0.5 {
+            let current_total = self.latest_debug_info.tick_counter; // This is a u64 Counter
+
+            // Calculate Difference
+            let ticks_passed = current_total.wrapping_sub(self.last_tick_count);
+            let time_passed = (time - self.last_measure_time) as f64;
+
+            // Calculate Rate
+            self.display_ups = (ticks_passed as f64 / time_passed) as u64;
+
+            // Save Snapshot
+            self.last_tick_count = current_total;
+            self.last_measure_time = time;
         }
 
         egui::CentralPanel::default()
@@ -160,7 +188,8 @@ impl eframe::App for Presenter {
                 egui::Window::new("Debug Info")
                     .resizable(false)
                     .collapsible(false)
-                    .anchor(egui::Align2::LEFT_TOP, [10.0, 10.0]) // Top-Left corner
+                    // .anchor(egui::Align2::LEFT_TOP, [10.0, 10.0]) // Top-Left corner
+                    .default_pos([10.0, 10.0]) // Top-Left corner
                     .show(ctx, |ui| {
                         // 1. Render FPS (Calculated by Egui)
                         // stable_dt is the smoothed time between frames
@@ -175,9 +204,9 @@ impl eframe::App for Presenter {
                             // For now, let's assume you store 'current_frame_data' in Presenter.
 
                             // IF you saved the latest FrameData in self.last_frame:
-                            ui.label(format!("delta time: {}", self.debug_info.delta_time));
-                            ui.label(format!("UPS: {:.0}", 1.0 / self.debug_info.update_time_ms));
-                            ui.label(format!("agent count: {}", self.debug_info.agent_count));
+                            ui.label(format!("UPS: {:.0}", self.display_ups));
+                            ui.label(format!("tick count: {:.0}", self.latest_debug_info.tick_counter));
+                            ui.label(format!("agent count: {}", self.latest_debug_info.agent_count));
 
                             // Simple placeholder if you haven't stored the struct yet:
                             ui.label(format!(
@@ -188,7 +217,7 @@ impl eframe::App for Presenter {
                         }
 
                         ui.separator();
-                        ui.label("System: Phase 1 (Prototype)");
+                        ui.label("Phase 1 (Prototype)");
                     });
 
                 ctx.request_repaint();
