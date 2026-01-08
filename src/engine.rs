@@ -55,7 +55,7 @@ impl Engine {
 
         // Stress test
         let mut rng = rand::rng();
-        for _ in 0..1000 {
+        for _ in 0..50000 {
             let width = 1024.0;
             let height = 768.0;
 
@@ -64,7 +64,7 @@ impl Engine {
             let rand_pos_y = rng.random_range(0.0..height);
 
             // Generate random position and velocity (optional, included for completeness)
-            let rand_vel_x = rng.random_range(-10.0..1.0);
+            let rand_vel_x = rng.random_range(-10.0..10.0);
             let rand_vel_y = rng.random_range(-10.0..10.0);
 
             // Generate random AgentColors
@@ -82,7 +82,7 @@ impl Engine {
                     x: 300.0 + rand_vel_x,
                     y: 150.0 + rand_vel_y,
                 },
-                AgentSize { radius: 15.0 },
+                AgentSize { radius: 1.0 },
                 // Assign the random colors
                 AgentColor {
                     r: r_val,
