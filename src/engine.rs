@@ -1,6 +1,7 @@
 // engine.rs
 
 use hecs::World;
+use rand::Rng;
 use std::thread;
 use std::time::Instant;
 
@@ -11,14 +12,16 @@ pub struct Engine {
     world: World,         // entity component system
     last_update: Instant, // used for delta_time calculation
     //
-    tick_counter: u64, // overflows in ~584,000 years at 1.000.000hz
+    tick_counter: u64,     // overflows in ~584,000 years at 1.000.000hz
     time_accumulator: f32, //
 }
 
 #[derive(Default, Clone, Copy)]
 pub struct DebugInfo {
-    pub tick_counter: u64,  // overflows in ~584,000 years at 1.000.000hz
-    pub agent_count: usize, // Useful since you are using ECS
+    pub tick_counter: u64,   // overflows in ~584,000 years at 1.000.000hz
+    pub agent_count: usize,  // Useful since you are using ECS
+    pub render_time_ms: f32, // Render time
+    pub delta_time: f32,     // Render time
 }
 
 pub struct FrameData {
@@ -40,17 +43,54 @@ pub struct Velocity {
 pub struct AgentSize {
     pub radius: f32,
 }
+pub struct AgentColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
 
 impl Engine {
     pub fn new() -> Self {
         let mut world = World::new();
 
-        // Spawn a test agent
-        world.spawn((
-            Position { x: 100.0, y: 100.0 },
-            Velocity { x: 300.0, y: 150.0 }, // Moving diagonally
-            AgentSize { radius: 15.0 },
-        ));
+        // Stress test
+        let mut rng = rand::rng();
+        for _ in 0..1000 {
+            let width = 1024.0;
+            let height = 768.0;
+
+            // Generate random position and velocity (optional, included for completeness)
+            let rand_pos_x = rng.random_range(0.0..width);
+            let rand_pos_y = rng.random_range(0.0..height);
+
+            // Generate random position and velocity (optional, included for completeness)
+            let rand_vel_x = rng.random_range(-10.0..1.0);
+            let rand_vel_y = rng.random_range(-10.0..10.0);
+
+            // Generate random AgentColors
+            // 0..=255 includes 255. (0..255 would stop at 254)
+            let r_val = rng.random_range(0..=255);
+            let g_val = rng.random_range(0..=255);
+            let b_val = rng.random_range(0..=255);
+
+            world.spawn((
+                Position {
+                    x: rand_pos_x,
+                    y: rand_pos_y,
+                },
+                Velocity {
+                    x: 300.0 + rand_vel_x,
+                    y: 150.0 + rand_vel_y,
+                },
+                AgentSize { radius: 15.0 },
+                // Assign the random colors
+                AgentColor {
+                    r: r_val,
+                    g: g_val,
+                    b: b_val,
+                },
+            ));
+        }
 
         Self {
             dummy_background_value: 0.0,
@@ -62,50 +102,70 @@ impl Engine {
     }
 
     pub fn tick(&mut self) {
-        // 1. Get current time
+        // time management
         let start_update = Instant::now();
-
-        // 2. Calculate difference (Delta Time) in seconds
         let delta_time = start_update.duration_since(self.last_update).as_secs_f32();
-
-        // 3. Reset the clock for the next tick
         self.last_update = start_update;
-
-        // 4. Use dt
-        // Example: Move at 60.0 units per second
-        self.dummy_background_value += 60.0 * delta_time;
-
-        // Agents Movement
-        // We query for everything that has a Position AND Velocity
-        for (_id, (pos, vel)) in self.world.query_mut::<(&mut Position, &mut Velocity)>() {
-            pos.x += vel.x * delta_time;
-            pos.y += vel.y * delta_time;
-
-            // (Optional) Wrap around screen for the "Ant Farm" feel
-            // In Phase 0.3, this would be collision with the Field
-            if pos.x > 1024.0 || pos.x < 0.0 {
-                vel.x *= -1.0;
-            }
-            if pos.y > 768.0 || pos.y < 0.0 {
-                vel.y *= -1.0;
-            }
-        };
-
-        // Add to the "bank" of time we need to simulate
+        //
         self.time_accumulator += delta_time;
 
-        // --- SPEED LIMIT ---
-        // This loop ONLY runs if 16ms have passed.
-        // If accumulator is 0.0001 (fast CPU), this loop is skipped entirely.
-        while self.time_accumulator >= FIXED_DT {
-            // ... Physics Logic ...
-            self.tick_counter += 1; // Count UPS only here
-            self.time_accumulator -= FIXED_DT;
+        // SPIRAL OF DEATH PROTECTION:
+        // If the game lags hard (0.25s freeze), don't try to catch up
+        // by running 15 physics steps instantly. Just cap it.
+        //
+        // the logic inside the while loop is currently too fast for this to happen,
+        // but it will stay here in case of future needs
+        if self.time_accumulator > 0.25 {
+            println!("Your simulation is running too slow ({})! slowing time down...", self.time_accumulator);
+            self.time_accumulator = 0.25;
         }
+
+        // fixed update loop
+        // We only update physics in chunks of FIXED_DT (e.g., 0.0166s)
+        while self.time_accumulator >= FIXED_DT {
+            // --- MOVEMENT LOGIC GOES HERE ---
+
+            // Notice we use FIXED_DT, *not* delta_time.
+            // This ensures the math is identical on every computer.
+            self.dummy_background_value += 60.0 * FIXED_DT;
+
+            for (_id, (pos, vel)) in self.world.query_mut::<(&mut Position, &mut Velocity)>() {
+                pos.x += vel.x * FIXED_DT;
+                pos.y += vel.y * FIXED_DT;
+
+                // Collision Logic
+                if pos.x >= 1024.0 {
+                    vel.x *= -1.0;
+                    pos.x = 1024.0;
+                }
+                if pos.x <= 0.0 {
+                    vel.x *= -1.0;
+                    pos.x = 0.0;
+                }
+                if pos.y >= 768.0 {
+                    vel.y *= -1.0;
+                    pos.y = 768.0;
+                }
+                if pos.y <= 0.0 {
+                    vel.y *= -1.0;
+                    pos.y = 0.0;
+                }
+            }
+
+            // thread::sleep(std::time::Duration::from_millis(20)); // spiral test
+
+            // 3. Consume the time
+            self.time_accumulator -= FIXED_DT;
+
+            // 4. Increment Tick Count (UPS)
+            // If you want to confirm your physics is running at 60Hz, count HERE.
+            self.tick_counter += 1;
+        }
+
     }
 
     pub fn render(&self, frame: &mut FrameData) {
-        // let start_render = Instant::now();
+        let start_render = Instant::now();
 
         // Sanity check to ensure buffer is big enough (resizes only if screen size changed)
         let required_size = frame.width * frame.height * 4;
@@ -118,26 +178,30 @@ impl Engine {
             frame.pixels.resize(required_size, 0);
         }
 
-        // 2. Render the Eulerian Grid (Your background/fields)
-        // dummy_image_checkerboard(&mut frame.pixels, frame.width, self.value);
+        // 2. Render the background
+        // _dummy_image_checkerboard(&mut frame.pixels, frame.width, self.dummy_background_value);
         frame.pixels.fill(0);
 
         // 3. Render the Lagrangian Agents (The ECS Entities)
         // We query purely for read access here
-        for (_id, (pos, size)) in &mut self.world.query::<(&Position, &AgentSize)>() {
+        for (_id, (pos, size, color)) in
+            &mut self.world.query::<(&Position, &AgentSize, &AgentColor)>()
+        {
             // Simple rasterization of a circle/square at pos.x/y
-            render_agent(frame, pos, size);
+            render_agent(frame, pos, size, color);
         }
+
 
         // 4. Debug info
         // Store in FrameData to send to UI
+        frame.debug_info.render_time_ms = start_render.elapsed().as_secs_f32() * 1000.0;
         frame.debug_info.tick_counter = self.tick_counter;
         frame.debug_info.agent_count = self.world.len() as usize;
     }
 }
 
 // Helper to draw agents onto the pixel buffer
-fn render_agent(frame: &mut FrameData, pos: &Position, size: &AgentSize) {
+fn render_agent(frame: &mut FrameData, pos: &Position, size: &AgentSize, color: &AgentColor) {
     let center_x = pos.x as isize;
     let center_y = pos.y as isize;
     let r = size.radius as isize;
@@ -149,10 +213,10 @@ fn render_agent(frame: &mut FrameData, pos: &Position, size: &AgentSize) {
             if x >= 0 && x < width && y >= 0 && y < frame.height as isize {
                 let idx = ((y * width + x) * 4) as usize;
                 // Draw Green Agent
-                frame.pixels[idx] = 0;
-                frame.pixels[idx + 1] = 255;
-                frame.pixels[idx + 2] = 0;
-                frame.pixels[idx + 3] = 255;
+                frame.pixels[idx] = color.r;
+                frame.pixels[idx + 1] = color.g;
+                frame.pixels[idx + 2] = color.b;
+                frame.pixels[idx + 3] = 155;
             }
         }
     }

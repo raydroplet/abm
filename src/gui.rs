@@ -203,7 +203,9 @@ impl eframe::App for Presenter {
                             // if you want to access them here, or just extract them when you recv().
                             // For now, let's assume you store 'current_frame_data' in Presenter.
 
-                            // IF you saved the latest FrameData in self.last_frame:
+                            // Calculate Engine FPS from the render time
+                            let engine_fps = 1000.0 / self.latest_debug_info.render_time_ms;
+                            ui.label(format!("Potential FPS: {:.0}", engine_fps));
                             ui.label(format!("UPS: {:.0}", self.display_ups));
                             ui.label(format!("tick count: {:.0}", self.latest_debug_info.tick_counter));
                             ui.label(format!("agent count: {}", self.latest_debug_info.agent_count));
