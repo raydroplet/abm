@@ -21,7 +21,6 @@ pub struct DebugInfo {
     pub tick_counter: u64,   // overflows in ~584,000 years at 1.000.000hz
     pub agent_count: usize,  // Useful since you are using ECS
     pub render_time_ms: f32, // Render time
-    pub delta_time: f32,     // Render time
 }
 
 pub struct FrameData {
