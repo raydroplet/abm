@@ -1,5 +1,7 @@
 // engine.rs
 
+use crate::wave::{WaveField};
+
 use hecs::World;
 use rand::Rng;
 use std::thread;
@@ -14,6 +16,8 @@ pub struct Engine {
     //
     tick_counter: u64,     // overflows in ~584,000 years at 1.000.000hz
     time_accumulator: f32, //
+    //
+    wave_field: WaveField,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -23,10 +27,15 @@ pub struct DebugInfo {
     pub render_time_ms: f32, // Render time
 }
 
-pub struct FrameData {
+pub struct ViewBuffer {
     pub width: usize,
     pub height: usize,
     pub pixels: Vec<u8>,
+}
+
+pub struct FrameData {
+    pub view_bufffer: ViewBuffer,
+    pub wave_field: WaveField,
     pub debug_info: DebugInfo,
 }
 
@@ -51,13 +60,12 @@ pub struct AgentColor {
 impl Engine {
     pub fn new() -> Self {
         let mut world = World::new();
+        let width = 1024.0;
+        let height = 768.0;
 
         // Stress test
         let mut rng = rand::rng();
-        for _ in 0..50000 {
-            let width = 1024.0;
-            let height = 768.0;
-
+        for _ in 0..1000 {
             // Generate random position and velocity (optional, included for completeness)
             let rand_pos_x = rng.random_range(0.0..width);
             let rand_pos_y = rng.random_range(0.0..height);
@@ -81,7 +89,7 @@ impl Engine {
                     x: 300.0 + rand_vel_x,
                     y: 150.0 + rand_vel_y,
                 },
-                AgentSize { radius: 1.0 },
+                AgentSize { radius: 10.0 },
                 // Assign the random colors
                 AgentColor {
                     r: r_val,
@@ -91,12 +99,17 @@ impl Engine {
             ));
         }
 
+        let mut field = WaveField::new(width as usize, height as usize, 16);
+
+        _dummy_field_gradient(&mut field.cells, field.width, field.height);
+
         Self {
             dummy_background_value: 0.0,
             world: world,
             last_update: Instant::now(),
             tick_counter: 0,
             time_accumulator: 0.0,
+            wave_field: field,
         }
     }
 
@@ -115,7 +128,10 @@ impl Engine {
         // the logic inside the while loop is currently too fast for this to happen,
         // but it will stay here in case of future needs
         if self.time_accumulator > 0.25 {
-            println!("Your simulation is running too slow ({})! slowing time down...", self.time_accumulator);
+            println!(
+                "Your simulation is running too slow ({})! slowing time down...",
+                self.time_accumulator
+            );
             self.time_accumulator = 0.25;
         }
 
@@ -160,26 +176,26 @@ impl Engine {
             // If you want to confirm your physics is running at 60Hz, count HERE.
             self.tick_counter += 1;
         }
-
     }
 
     pub fn render(&self, frame: &mut FrameData) {
         let start_render = Instant::now();
+        let view = &mut frame.view_bufffer;
 
         // Sanity check to ensure buffer is big enough (resizes only if screen size changed)
-        let required_size = frame.width * frame.height * 4;
-        if frame.pixels.len() != required_size {
+        let required_size = view.width * view.height * 4;
+        if view.pixels.len() != required_size {
             println!(
                 "resize happened: {} -> {}",
-                frame.pixels.len(),
+                view.pixels.len(),
                 required_size
             );
-            frame.pixels.resize(required_size, 0);
+            view.pixels.resize(required_size, 0);
         }
 
         // 2. Render the background
-        // _dummy_image_checkerboard(&mut frame.pixels, frame.width, self.dummy_background_value);
-        frame.pixels.fill(0);
+        // _dummy_image_checkerboard(&mut view.pixels, view.width, self.dummy_background_value);
+        view.pixels.fill(0);
 
         // 3. Render the Lagrangian Agents (The ECS Entities)
         // We query purely for read access here
@@ -190,12 +206,14 @@ impl Engine {
             render_agent(frame, pos, size, color);
         }
 
-
         // 4. Debug info
         // Store in FrameData to send to UI
         frame.debug_info.render_time_ms = start_render.elapsed().as_secs_f32() * 1000.0;
         frame.debug_info.tick_counter = self.tick_counter;
         frame.debug_info.agent_count = self.world.len() as usize;
+
+        // 5. field
+        frame.wave_field = self.wave_field.clone();
     }
 }
 
@@ -204,18 +222,19 @@ fn render_agent(frame: &mut FrameData, pos: &Position, size: &AgentSize, color: 
     let center_x = pos.x as isize;
     let center_y = pos.y as isize;
     let r = size.radius as isize;
-    let width = frame.width as isize;
+    let view = &mut frame.view_bufffer;
+    let width = view.width as isize;
 
     // Naive box drawing for prototype
     for y in (center_y - r)..=(center_y + r) {
         for x in (center_x - r)..=(center_x + r) {
-            if x >= 0 && x < width && y >= 0 && y < frame.height as isize {
+            if x >= 0 && x < width && y >= 0 && y < view.height as isize {
                 let idx = ((y * width + x) * 4) as usize;
                 // Draw Green Agent
-                frame.pixels[idx] = color.r;
-                frame.pixels[idx + 1] = color.g;
-                frame.pixels[idx + 2] = color.b;
-                frame.pixels[idx + 3] = 155;
+                view.pixels[idx] = (color.r as f32 * 0.7) as u8;
+                view.pixels[idx + 1] = (color.g as f32 * 0.7) as u8;
+                view.pixels[idx + 2] = (color.b as f32 * 0.7) as u8;
+                view.pixels[idx + 3] = 255;
             }
         }
     }
@@ -276,5 +295,23 @@ fn _dummy_image_sunrises(pixels: &mut Vec<u8>, _width: usize, value: f32) {
         pixel[1] = val / 2;
         pixel[2] = 255 - val;
         pixel[3] = 255;
+    }
+}
+
+fn _dummy_field_gradient(cells: &mut Vec<f32>, width: usize, height: usize) {
+    let center_x = width as f32 / 2.0;
+    let center_y = height as f32 / 2.0;
+    let max_dist = center_x.min(center_y); // Radius
+
+    for (i, e) in cells.iter_mut().enumerate() {
+        // 1. Convert 1D index to 2D coordinates
+        let x = (i % width) as f32;
+        let y = (i / width) as f32;
+
+        // 2. Calculate distance from center
+        let dist = ((x - center_x).powi(2) + (y - center_y).powi(2)).sqrt();
+
+        // 3. Inverse intensity (1.0 at center, 0.0 at edge)
+        *e = (1.0 - (dist / max_dist)).clamp(0.0, 1.0);
     }
 }

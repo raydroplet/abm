@@ -1,5 +1,6 @@
 // main.rs
 mod gui;
+mod wave;
 mod engine;
 
 use gui::{Presenter, Producer, crossbeam};

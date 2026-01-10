@@ -1,6 +1,8 @@
 // gui.rs
 
-use crate::engine::{DebugInfo, Engine, FrameData};
+use crate::engine::{DebugInfo, Engine, FrameData, ViewBuffer};
+use crate::wave::{WaveField};
+
 pub use crossbeam_channel as crossbeam;
 pub use eframe::egui;
 use std::thread;
@@ -60,7 +62,8 @@ impl Producer {
 pub struct Presenter {
     receiver: crossbeam::Receiver<FrameData>,
     returner: crossbeam::Sender<FrameData>,
-    texture: Option<egui::TextureHandle>,
+    view_texture: Option<egui::TextureHandle>,
+    wave_texture: Option<egui::TextureHandle>, // NEW: For WaveField
     //
     latest_debug_info: DebugInfo,
     //
@@ -78,7 +81,8 @@ impl Presenter {
         Self {
             receiver: frame_receiver,
             returner: frame_returner,
-            texture: None,
+            view_texture: None,
+            wave_texture: None,
             //
             latest_debug_info: DebugInfo::default(),
             //
@@ -96,9 +100,12 @@ impl Presenter {
 
         for _ in 0..2 {
             let _ = self.returner.send(FrameData {
-                width: width,
-                height: height,
-                pixels: vec![0; buffer_size],
+                view_bufffer: ViewBuffer {
+                    width: width,
+                    height: height,
+                    pixels: vec![0; buffer_size],
+                },
+                wave_field: WaveField::default(),
                 debug_info: DebugInfo::default(),
             });
         }
@@ -122,6 +129,23 @@ impl Presenter {
             }),
         )
     }
+
+    // In Presenter impl
+    fn field_to_image(&self, field: &WaveField) -> egui::ColorImage {
+        // 1. We use the FIELD dimensions (e.g., 100x100), not the window dimensions.
+        let w = field.width;
+        let h = field.height;
+
+        let mut pixels = Vec::with_capacity(w * h * 4);
+
+        for &value in &field.cells {
+            let intensity = (value.clamp(0.0, 1.0) * 255.0) as u8;
+            // R, G, B, Alpha
+            pixels.extend_from_slice(&[intensity, intensity, intensity, 255]);
+        }
+
+        egui::ColorImage::from_rgba_unmultiplied([w, h], &pixels)
+    }
 }
 
 impl eframe::App for Presenter {
@@ -137,17 +161,30 @@ impl eframe::App for Presenter {
 
         // extracts FrameData. if we fail we still render the last known data
         if let Some(frame) = latest {
-            // queries the frame data into an egui image to be render latter
-            let image = egui::ColorImage::from_rgba_unmultiplied(
-                [frame.width, frame.height],
-                &frame.pixels,
-            );
+            let view = &frame.view_bufffer;
+            let field = &frame.wave_field;
 
-            match &mut self.texture {
-                Some(texture) => texture.set(image, egui::TextureOptions::NEAREST),
+            // A. Update Textures
+            // ------------------
+
+            // 1. Agent Texture (1:1 Size)
+            let view_image =
+                egui::ColorImage::from_rgba_unmultiplied([view.width, view.height], &view.pixels);
+            match &mut self.view_texture {
+                Some(t) => t.set(view_image, egui::TextureOptions::NEAREST),
                 None => {
-                    self.texture =
-                        Some(ctx.load_texture("display", image, egui::TextureOptions::NEAREST));
+                    self.view_texture =
+                        Some(ctx.load_texture("agents", view_image, egui::TextureOptions::NEAREST))
+                }
+            };
+
+            // 2. Wave Texture (Small Size - e.g. 102x76)
+            let field_image = self.field_to_image(field);
+            match &mut self.wave_texture {
+                Some(t) => t.set(field_image, egui::TextureOptions::NEAREST),
+                None => {
+                    self.wave_texture =
+                        Some(ctx.load_texture("waves", field_image, egui::TextureOptions::NEAREST))
                 }
             };
 
@@ -178,9 +215,45 @@ impl eframe::App for Presenter {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(egui::Color32::BLACK))
             .show(ctx, |ui| {
-                // 3. Draw
-                if let Some(texture) = &self.texture {
-                    ui.image(texture);
+                // Define the Target Size (The Window Size)
+                // We use the agent buffer size as the source of truth for "Window Size"
+                // assuming view_texture exists (it should after the first frame).
+                let target_size = if let Some(t) = &self.view_texture {
+                    t.size_vec2()
+                } else {
+                    egui::vec2(1024.0, 768.0) // Fallback
+                };
+
+                // STEP 1: Draw Background (Waves) - STRETCHED
+                // We use a variable to capture where it ends up on screen
+                let mut rect = None;
+
+                if let Some(wave_tex) = &self.wave_texture {
+                    let response = ui.add(
+                        egui::Image::new(wave_tex)
+                            // CRITICAL: Force the small texture to fill the target size
+                            .fit_to_exact_size(target_size)
+                            .maintain_aspect_ratio(false)
+                            // OPTIONAL: Use NEAREST for pixelated look, LINEAR for blurry
+                            .texture_options(egui::TextureOptions::NEAREST),
+                    );
+                    rect = Some(response.rect);
+                }
+
+                // STEP 2: Draw Foreground (Agents) - OVERLAY
+                if let Some(agent_tex) = &self.view_texture {
+                    if let Some(screen_rect) = rect {
+                        // If we drew the background, draw agents EXACTLY over it
+                        ui.painter().image(
+                            agent_tex.id(),
+                            screen_rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                    } else {
+                        // Fallback if background is missing (just draw agents normally)
+                        ui.image(agent_tex);
+                    }
                 }
 
                 // DEBUG OVERLAY
@@ -198,7 +271,7 @@ impl eframe::App for Presenter {
 
                         // 2. Engine Stats (From the latest frame we received)
                         // We access the texture data indirectly or just use the last frame received
-                        if let Some(texture) = &self.texture {
+                        if let Some(texture) = &self.view_texture {
                             // Note: You might need to store the 'latest_stats' in Presenter struct
                             // if you want to access them here, or just extract them when you recv().
                             // For now, let's assume you store 'current_frame_data' in Presenter.
@@ -207,8 +280,14 @@ impl eframe::App for Presenter {
                             let engine_fps = 1000.0 / self.latest_debug_info.render_time_ms;
                             ui.label(format!("Potential FPS: {:.0}", engine_fps));
                             ui.label(format!("UPS: {:.0}", self.display_ups));
-                            ui.label(format!("tick count: {:.0}", self.latest_debug_info.tick_counter));
-                            ui.label(format!("agent count: {}", self.latest_debug_info.agent_count));
+                            ui.label(format!(
+                                "tick count: {:.0}",
+                                self.latest_debug_info.tick_counter
+                            ));
+                            ui.label(format!(
+                                "agent count: {}",
+                                self.latest_debug_info.agent_count
+                            ));
 
                             // Simple placeholder if you haven't stored the struct yet:
                             ui.label(format!(

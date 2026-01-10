@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 crossbeam-channel = "0.5.15"
 eframe = "0.33.3"
+glam = "0.30.10"
 hecs = "0.10.5"
 rand = "0.9.2"
 
