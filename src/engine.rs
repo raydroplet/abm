@@ -1,6 +1,6 @@
 // engine.rs
 
-use crate::wave::{WaveField};
+use crate::wave::{Signal, SignalKey, SignalLayer, SignalMask, Viewport};
 
 use hecs::World;
 use rand::Rng;
@@ -17,7 +17,9 @@ pub struct Engine {
     tick_counter: u64,     // overflows in ~584,000 years at 1.000.000hz
     time_accumulator: f32, //
     //
-    wave_field: WaveField,
+    signal_layer: SignalLayer<1>,
+    //
+    camera_dimension: [f32; 2],
 }
 
 #[derive(Default, Clone, Copy)]
@@ -35,7 +37,7 @@ pub struct ViewBuffer {
 
 pub struct FrameData {
     pub view_bufffer: ViewBuffer,
-    pub wave_field: WaveField,
+    pub signals: Vec<Signal>,
     pub debug_info: DebugInfo,
 }
 
@@ -56,26 +58,25 @@ pub struct AgentColor {
     pub g: u8,
     pub b: u8,
 }
+pub struct SignalEmitter {
+    pub signal_id: SignalKey,
+}
 
 impl Engine {
     pub fn new() -> Self {
         let mut world = World::new();
+        let mut signal_layer = SignalLayer::new(); // User variable name
         let width = 1024.0;
         let height = 768.0;
-
-        // Stress test
         let mut rng = rand::rng();
+
+        // 1. Spawn 1000 "Dummy" Agents (No Signal)
         for _ in 0..1000 {
-            // Generate random position and velocity (optional, included for completeness)
+            // ... (Your existing random generation code) ...
             let rand_pos_x = rng.random_range(0.0..width);
             let rand_pos_y = rng.random_range(0.0..height);
-
-            // Generate random position and velocity (optional, included for completeness)
             let rand_vel_x = rng.random_range(-10.0..10.0);
             let rand_vel_y = rng.random_range(-10.0..10.0);
-
-            // Generate random AgentColors
-            // 0..=255 includes 255. (0..255 would stop at 254)
             let r_val = rng.random_range(0..=255);
             let g_val = rng.random_range(0..=255);
             let b_val = rng.random_range(0..=255);
@@ -90,7 +91,6 @@ impl Engine {
                     y: 150.0 + rand_vel_y,
                 },
                 AgentSize { radius: 10.0 },
-                // Assign the random colors
                 AgentColor {
                     r: r_val,
                     g: g_val,
@@ -99,15 +99,43 @@ impl Engine {
             ));
         }
 
-        let field = WaveField::new();
+        // 2. Spawn THE CHOSEN ONE (With Signal)
+        // Let's make it stand out (Red Color, Center Screen)
+        let hero_pos = [512.0, 384.0];
+
+        // A. Create the Signal first
+        let mut mask = SignalMask::default();
+        mask.set(0, true); // Bit 0 = Red Color in your GUI
+
+        let sig_key = signal_layer.emit(Signal {
+            origin: hero_pos,
+            outer_radius: 150.0, // Big Radius
+            inner_radius: 120.0, // Ring effect
+            intensity: 1.0,
+            falloff: 0.5,
+            mask,
+        });
+
+        // B. Spawn the Entity with the Link
+        world.spawn((
+            Position {
+                x: hero_pos[0],
+                y: hero_pos[1],
+            },
+            Velocity { x: 200.0, y: 200.0 },      // Moving fast
+            AgentSize { radius: 15.0 },           // Slightly bigger
+            AgentColor { r: 255, g: 0, b: 0 },    // Red Agent
+            SignalEmitter { signal_id: sig_key }, // <--- THE LINK
+        ));
 
         Self {
             dummy_background_value: 0.0,
-            world: world,
+            world,
             last_update: Instant::now(),
             tick_counter: 0,
             time_accumulator: 0.0,
-            wave_field: field,
+            signal_layer, // Store the layer
+            camera_dimension: [width, height],
         }
     }
 
@@ -136,17 +164,14 @@ impl Engine {
         // fixed update loop
         // We only update physics in chunks of FIXED_DT (e.g., 0.0166s)
         while self.time_accumulator >= FIXED_DT {
-            // --- MOVEMENT LOGIC GOES HERE ---
-
-            // Notice we use FIXED_DT, *not* delta_time.
-            // This ensures the math is identical on every computer.
             self.dummy_background_value += 60.0 * FIXED_DT;
 
+            // 1. MOVEMENT LOOP (Updates Position)
             for (_id, (pos, vel)) in self.world.query_mut::<(&mut Position, &mut Velocity)>() {
                 pos.x += vel.x * FIXED_DT;
                 pos.y += vel.y * FIXED_DT;
 
-                // Collision Logic
+                // Collision Logic (Bounce off walls)
                 if pos.x >= 1024.0 {
                     vel.x *= -1.0;
                     pos.x = 1024.0;
@@ -165,13 +190,19 @@ impl Engine {
                 }
             }
 
-            // thread::sleep(std::time::Duration::from_millis(20)); // spiral test
+            // 2. SIGNAL SYNC LOOP (Updates SignalLayer)
+            // We iterate over entities that have BOTH Position and Emitter
+            for (_id, (pos, emitter)) in self.world.query_mut::<(&Position, &SignalEmitter)>() {
+                // Reposition the signal to match the agent
+                // We split the borrow here: 'pos' is from 'world', 'reposition' is on 'signal_layer'
+                self.signal_layer.reposition(
+                    emitter.signal_id,
+                    [pos.x, pos.y],
+                    150.0, // Keep the radius constant (or pulse it here!)
+                );
+            }
 
-            // 3. Consume the time
             self.time_accumulator -= FIXED_DT;
-
-            // 4. Increment Tick Count (UPS)
-            // If you want to confirm your physics is running at 60Hz, count HERE.
             self.tick_counter += 1;
         }
     }
@@ -211,7 +242,16 @@ impl Engine {
         frame.debug_info.agent_count = self.world.len() as usize;
 
         // 5. field
-        frame.wave_field = self.wave_field.clone();
+        let mut mask = SignalMask::default();
+        mask.fill(true);
+        let signals = self.signal_layer.query_snapshot(
+            Viewport {
+                min: [0.0, 0.0],
+                max: [self.camera_dimension[0], self.camera_dimension[1]],
+            },
+            &mask,
+        );
+        frame.signals = signals;
     }
 }
 

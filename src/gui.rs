@@ -1,7 +1,7 @@
 // gui.rs
 
 use crate::engine::{DebugInfo, Engine, FrameData, ViewBuffer};
-use crate::wave::{WaveField};
+use crate::wave::Signal;
 
 pub use crossbeam_channel as crossbeam;
 pub use eframe::egui;
@@ -63,9 +63,9 @@ pub struct Presenter {
     receiver: crossbeam::Receiver<FrameData>,
     returner: crossbeam::Sender<FrameData>,
     view_texture: Option<egui::TextureHandle>,
-    wave_texture: Option<egui::TextureHandle>, // NEW: For WaveField
     //
     latest_debug_info: DebugInfo,
+    latest_signals: Vec<Signal>,
     //
     // UPS (Physics) Smoothing
     last_tick_count: u64,   // Snapshot of total ticks 0.5s ago
@@ -82,9 +82,9 @@ impl Presenter {
             receiver: frame_receiver,
             returner: frame_returner,
             view_texture: None,
-            wave_texture: None,
             //
             latest_debug_info: DebugInfo::default(),
+            latest_signals: Vec::default(),
             //
             last_tick_count: 0,
             last_measure_time: 0.0,
@@ -105,7 +105,7 @@ impl Presenter {
                     height: height,
                     pixels: vec![0; buffer_size],
                 },
-                wave_field: WaveField::new(),
+                signals: Vec::new(),
                 debug_info: DebugInfo::default(),
             });
         }
@@ -129,177 +129,143 @@ impl Presenter {
             }),
         )
     }
-
-    // In Presenter impl
-    fn field_to_image(&self, field: &WaveField) -> egui::ColorImage {
-        //
-        // let mut pixels = Vec::with_capacity(w * h * 4);
-        //
-        // for &value in &field.cells {
-        //     let intensity = (value.clamp(0.0, 1.0) * 255.0) as u8;
-        //     // R, G, B, Alpha
-        //     pixels.extend_from_slice(&[intensity, intensity, intensity, 255]);
-        // }
-        //
-        // egui::ColorImage::from_rgba_unmultiplied([w, h], &pixels)
-
-        egui::ColorImage::default()
-    }
 }
 
 impl eframe::App for Presenter {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 1. Drain Channel (Get latest, recycle rest)
+        // ---------------------------------------------------------------------
+        // 1. DATA SYNC
+        // ---------------------------------------------------------------------
         let mut latest = None;
+
+        // Drain channel to get the absolutely newest frame
         while let Ok(frame) = self.receiver.try_recv() {
             if let Some(old) = latest {
-                let _ = self.returner.send(old);
+                let _ = self.returner.send(old); // Recycle skipped frames
             }
             latest = Some(frame);
         }
 
-        // extracts FrameData. if we fail we still render the last known data
+        // If we got new data, update our local state
         if let Some(frame) = latest {
             let view = &frame.view_bufffer;
-            let field = &frame.wave_field;
 
-            // A. Update Textures
-            // ------------------
-
-            // 1. Agent Texture (1:1 Size)
+            // A. Update Agents Texture (Pixel Buffer)
             let view_image =
                 egui::ColorImage::from_rgba_unmultiplied([view.width, view.height], &view.pixels);
+
             match &mut self.view_texture {
                 Some(t) => t.set(view_image, egui::TextureOptions::NEAREST),
                 None => {
                     self.view_texture =
-                        Some(ctx.load_texture("agents", view_image, egui::TextureOptions::NEAREST))
+                        Some(ctx.load_texture("agents", view_image, egui::TextureOptions::NEAREST));
                 }
             };
 
-            // 2. Wave Texture (Small Size - e.g. 102x76)
-            let field_image = self.field_to_image(field);
-            match &mut self.wave_texture {
-                Some(t) => t.set(field_image, egui::TextureOptions::NEAREST),
-                None => {
-                    self.wave_texture =
-                        Some(ctx.load_texture("waves", field_image, egui::TextureOptions::NEAREST))
-                }
-            };
+            // B. Store Wave Data (Vector Data)
+            self.latest_signals = frame.signals.clone();
 
-            // debug info
+            // C. Store Stats
             self.latest_debug_info = frame.debug_info;
 
-            // Recycle...
+            // D. Recycle the frame buffer back to Engine
             let _ = self.returner.send(frame);
         }
 
-        // Calculate Physics UPS (Snapshot Delta)
+        // ---------------------------------------------------------------------
+        // 2. PHYSICS RATE CALCULATION (UPS)
+        // ---------------------------------------------------------------------
         let time = ctx.input(|i| i.time);
         if time - self.last_measure_time >= 0.5 {
-            let current_total = self.latest_debug_info.tick_counter; // This is a u64 Counter
-
-            // Calculate Difference
+            let current_total = self.latest_debug_info.tick_counter;
             let ticks_passed = current_total.wrapping_sub(self.last_tick_count);
             let time_passed = (time - self.last_measure_time) as f64;
 
-            // Calculate Rate
             self.display_ups = (ticks_passed as f64 / time_passed) as u64;
-
-            // Save Snapshot
             self.last_tick_count = current_total;
             self.last_measure_time = time;
         }
 
+        // ---------------------------------------------------------------------
+        // 3. RENDER LOOP
+        // ---------------------------------------------------------------------
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(egui::Color32::BLACK))
             .show(ctx, |ui| {
-                // Define the Target Size (The Window Size)
-                // We use the agent buffer size as the source of truth for "Window Size"
-                // assuming view_texture exists (it should after the first frame).
-                let target_size = if let Some(t) = &self.view_texture {
-                    t.size_vec2()
-                } else {
-                    egui::vec2(1024.0, 768.0) // Fallback
-                };
+                // --- LAYER 1: WAVES (Vector Graphics) ---
+                // We draw this first so it appears "behind" the agents.
+                // Inside egui::CentralPanel...
+                let painter = ui.painter();
 
-                // STEP 1: Draw Background (Waves) - STRETCHED
-                // We use a variable to capture where it ends up on screen
-                let mut rect = None;
+                for sig in &self.latest_signals {
+                    // Renamed from circles
 
-                if let Some(wave_tex) = &self.wave_texture {
-                    let response = ui.add(
-                        egui::Image::new(wave_tex)
-                            // CRITICAL: Force the small texture to fill the target size
-                            .fit_to_exact_size(target_size)
-                            .maintain_aspect_ratio(false)
-                            // OPTIONAL: Use NEAREST for pixelated look, LINEAR for blurry
-                            .texture_options(egui::TextureOptions::NEAREST),
-                    );
-                    rect = Some(response.rect);
-                }
+                    // 1. Calculate Opacity based on Strength
+                    // We clamp it so it doesn't vanish completely or become solid rock.
+                    let alpha = (sig.intensity * 255.0).clamp(0.0, 255.0) as u8;
 
-                // STEP 2: Draw Foreground (Agents) - OVERLAY
-                if let Some(agent_tex) = &self.view_texture {
-                    if let Some(screen_rect) = rect {
-                        // If we drew the background, draw agents EXACTLY over it
-                        ui.painter().image(
-                            agent_tex.id(),
-                            screen_rect,
-                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                            egui::Color32::WHITE,
+                    // 2. Resolve Color
+                    let base_color = match sig.mask.trailing_zeros() {
+                        0 => egui::Color32::from_rgba_unmultiplied(255, 50, 50, alpha), // Bit 0: Red (Sound)
+                        1 => egui::Color32::from_rgba_unmultiplied(50, 255, 50, alpha), // Bit 1: Green (Smell)
+                        2 => egui::Color32::from_rgba_unmultiplied(50, 100, 255, alpha), // Bit 2: Blue (Radio)
+                        3 => egui::Color32::from_rgba_unmultiplied(255, 255, 0, alpha), // Bit 3: Yellow (Light)
+                        4 => egui::Color32::from_rgba_unmultiplied(255, 0, 255, alpha), // Bit 4: Magenta (Magic)
+                        5 => egui::Color32::from_rgba_unmultiplied(0, 255, 255, alpha), // Bit 5: Cyan (Electric)
+                        6 => egui::Color32::from_rgba_unmultiplied(255, 140, 0, alpha), // Bit 6: Orange (Heat)
+                        7 => egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha), // Bit 7: White (Debug)
+                        _ => egui::Color32::from_gray(alpha), // Should effectively never happen
+                    };
+
+                    // 3. Render Logic: RING vs CIRCLE
+                    if sig.inner_radius > 0.5 {
+                        // --- IT IS A WAVE (RING) ---
+                        // We use a thick stroke to simulate the "body" of the wave.
+
+                        let thickness = sig.outer_radius - sig.inner_radius;
+                        let center_radius = sig.inner_radius + (thickness / 2.0);
+
+                        painter.circle_stroke(
+                            egui::pos2(sig.origin[0], sig.origin[1]),
+                            center_radius,
+                            egui::Stroke::new(thickness, base_color),
                         );
                     } else {
-                        // Fallback if background is missing (just draw agents normally)
-                        ui.image(agent_tex);
+                        // --- IT IS A SOURCE (SOLID CIRCLE) ---
+                        painter.circle_filled(
+                            egui::pos2(sig.origin[0], sig.origin[1]),
+                            sig.outer_radius,
+                            base_color,
+                        );
                     }
                 }
 
-                // DEBUG OVERLAY
-                // We create a floating window that cannot be collapsed or resized
+                // --- LAYER 2: AGENTS (Texture Overlay) ---
+                if let Some(agent_tex) = &self.view_texture {
+                    // Draw the image filling the entire window
+                    ui.image(agent_tex);
+                }
+
+                // --- LAYER 3: DEBUG UI ---
                 egui::Window::new("Debug Info")
                     .resizable(false)
                     .collapsible(false)
-                    // .anchor(egui::Align2::LEFT_TOP, [10.0, 10.0]) // Top-Left corner
-                    .default_pos([10.0, 10.0]) // Top-Left corner
+                    .default_pos([10.0, 10.0])
                     .show(ctx, |ui| {
-                        // 1. Render FPS (Calculated by Egui)
-                        // stable_dt is the smoothed time between frames
                         let fps = 1.0 / ctx.input(|i| i.stable_dt);
                         ui.label(format!("Render FPS: {:.0}", fps));
 
-                        // 2. Engine Stats (From the latest frame we received)
-                        // We access the texture data indirectly or just use the last frame received
-                        if let Some(texture) = &self.view_texture {
-                            // Note: You might need to store the 'latest_stats' in Presenter struct
-                            // if you want to access them here, or just extract them when you recv().
-                            // For now, let's assume you store 'current_frame_data' in Presenter.
-
-                            // Calculate Engine FPS from the render time
-                            let engine_fps = 1000.0 / self.latest_debug_info.render_time_ms;
-                            ui.label(format!("Potential FPS: {:.0}", engine_fps));
-                            ui.label(format!("UPS: {:.0}", self.display_ups));
-                            ui.label(format!(
-                                "tick count: {:.0}",
-                                self.latest_debug_info.tick_counter
-                            ));
-                            ui.label(format!(
-                                "agent count: {}",
-                                self.latest_debug_info.agent_count
-                            ));
-
-                            // Simple placeholder if you haven't stored the struct yet:
-                            ui.label(format!(
-                                "Texture Size: {}x{}",
-                                texture.size()[0],
-                                texture.size()[1]
-                            ));
-                        }
+                        let engine_fps = 1000.0 / self.latest_debug_info.render_time_ms;
+                        ui.label(format!("Potential FPS: {:.0}", engine_fps));
+                        ui.label(format!("UPS: {:.0}", self.display_ups));
 
                         ui.separator();
-                        ui.label("Phase 1 (Prototype)");
+                        ui.label(format!("Ticks: {}", self.latest_debug_info.tick_counter));
+                        ui.label(format!("Agents: {}", self.latest_debug_info.agent_count));
+                        ui.label(format!("Waves: {}", self.latest_signals.len()));
                     });
 
+                // Force constant repaint to hit 60 FPS
                 ctx.request_repaint();
             });
     }
