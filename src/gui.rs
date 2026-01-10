@@ -105,7 +105,7 @@ impl Presenter {
                     height: height,
                     pixels: vec![0; buffer_size],
                 },
-                wave_field: WaveField::default(),
+                wave_field: WaveField::new(),
                 debug_info: DebugInfo::default(),
             });
         }
@@ -132,19 +132,18 @@ impl Presenter {
 
     // In Presenter impl
     fn field_to_image(&self, field: &WaveField) -> egui::ColorImage {
-        // 1. We use the FIELD dimensions (e.g., 100x100), not the window dimensions.
-        let w = field.width;
-        let h = field.height;
+        //
+        // let mut pixels = Vec::with_capacity(w * h * 4);
+        //
+        // for &value in &field.cells {
+        //     let intensity = (value.clamp(0.0, 1.0) * 255.0) as u8;
+        //     // R, G, B, Alpha
+        //     pixels.extend_from_slice(&[intensity, intensity, intensity, 255]);
+        // }
+        //
+        // egui::ColorImage::from_rgba_unmultiplied([w, h], &pixels)
 
-        let mut pixels = Vec::with_capacity(w * h * 4);
-
-        for &value in &field.cells {
-            let intensity = (value.clamp(0.0, 1.0) * 255.0) as u8;
-            // R, G, B, Alpha
-            pixels.extend_from_slice(&[intensity, intensity, intensity, 255]);
-        }
-
-        egui::ColorImage::from_rgba_unmultiplied([w, h], &pixels)
+        egui::ColorImage::default()
     }
 }
 

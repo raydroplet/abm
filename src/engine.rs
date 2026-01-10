@@ -4,7 +4,7 @@ use crate::wave::{WaveField};
 
 use hecs::World;
 use rand::Rng;
-use std::thread;
+// use std::thread;
 use std::time::Instant;
 
 const FIXED_DT: f32 = 1.0 / 60.0; // Run physics exactly 60 times a second
@@ -99,9 +99,7 @@ impl Engine {
             ));
         }
 
-        let mut field = WaveField::new(width as usize, height as usize, 16);
-
-        _dummy_field_gradient(&mut field.cells, field.width, field.height);
+        let field = WaveField::new();
 
         Self {
             dummy_background_value: 0.0,
@@ -295,23 +293,5 @@ fn _dummy_image_sunrises(pixels: &mut Vec<u8>, _width: usize, value: f32) {
         pixel[1] = val / 2;
         pixel[2] = 255 - val;
         pixel[3] = 255;
-    }
-}
-
-fn _dummy_field_gradient(cells: &mut Vec<f32>, width: usize, height: usize) {
-    let center_x = width as f32 / 2.0;
-    let center_y = height as f32 / 2.0;
-    let max_dist = center_x.min(center_y); // Radius
-
-    for (i, e) in cells.iter_mut().enumerate() {
-        // 1. Convert 1D index to 2D coordinates
-        let x = (i % width) as f32;
-        let y = (i / width) as f32;
-
-        // 2. Calculate distance from center
-        let dist = ((x - center_x).powi(2) + (y - center_y).powi(2)).sqrt();
-
-        // 3. Inverse intensity (1.0 at center, 0.0 at edge)
-        *e = (1.0 - (dist / max_dist)).clamp(0.0, 1.0);
     }
 }
