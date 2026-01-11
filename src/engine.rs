@@ -1,13 +1,18 @@
 // engine.rs
 
-use crate::wave::{Signal, SignalKey, SignalLayer, SignalMask, Viewport};
+use crate::wave::{Signal, SignalField, SignalKey, SignalMask};
 
 use hecs::World;
 use rand::Rng;
+use std::ops::{Deref, DerefMut};
 // use std::thread;
+use glam::Vec2;
 use std::time::Instant;
 
-const FIXED_DT: f32 = 1.0 / 60.0; // Run physics exactly 60 times a second
+const FIXED_DT: f32 = 1.0 / 100.0; // Run physics exactly 60 times a second
+//
+pub const BIT_RENDER: usize = 0;
+pub const BIT_PASSIVE: usize = 7;
 //
 pub struct Engine {
     dummy_background_value: f32,
@@ -17,9 +22,10 @@ pub struct Engine {
     tick_counter: u64,     // overflows in ~584,000 years at 1.000.000hz
     time_accumulator: f32, //
     //
-    signal_layer: SignalLayer<1>,
+    signal_layer: SignalField,
     //
-    camera_dimension: [f32; 2],
+    camera_dimension: Vec2,
+    camera_position: Vec2,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -29,27 +35,49 @@ pub struct DebugInfo {
     pub render_time_ms: f32, // Render time
 }
 
-pub struct ViewBuffer {
-    pub width: usize,
-    pub height: usize,
-    pub pixels: Vec<u8>,
+#[derive(Clone, Copy, Debug)]
+pub struct AgentPoint {
+    pub position: Vec2,
+    pub radius: f32,
+    pub color: [u8; 4],
+    // Add extra fields here if your shaders need them (e.g., velocity for motion blur)
 }
 
 pub struct FrameData {
-    pub view_bufffer: ViewBuffer,
-    pub signals: Vec<Signal>,
+    pub agents: Vec<AgentPoint>, // The "Points" for the GPU
+    pub signals: Vec<Signal>,    // Keep these for UI/Overlay logic
     pub debug_info: DebugInfo,
 }
 
 // --- Components (The Data) ---
-pub struct Position {
-    pub x: f32,
-    pub y: f32,
+#[derive(Debug, Clone, Copy)]
+pub struct Position(pub Vec2); // Unique type 1
+impl Deref for Position {
+    type Target = Vec2;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
-pub struct Velocity {
-    pub x: f32,
-    pub y: f32,
+impl DerefMut for Position {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
+
+#[derive(Debug, Clone, Copy)]
+pub struct Velocity(pub Vec2); // Unique type 2
+impl Deref for Velocity {
+    type Target = Vec2;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl DerefMut for Velocity {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+//
 pub struct AgentSize {
     pub radius: f32,
 }
@@ -65,7 +93,7 @@ pub struct SignalEmitter {
 impl Engine {
     pub fn new() -> Self {
         let mut world = World::new();
-        let mut signal_layer = SignalLayer::new(); // User variable name
+        let mut signal_layer = SignalField::new(); // User variable name
         let width = 1024.0;
         let height = 768.0;
         let mut rng = rand::rng();
@@ -75,21 +103,16 @@ impl Engine {
             // ... (Your existing random generation code) ...
             let rand_pos_x = rng.random_range(0.0..width);
             let rand_pos_y = rng.random_range(0.0..height);
-            let rand_vel_x = rng.random_range(-10.0..10.0);
-            let rand_vel_y = rng.random_range(-10.0..10.0);
+            let rand_vel_x = rng.random_range(-100.0..100.0);
+            let rand_vel_y = rng.random_range(-100.0..100.0);
             let r_val = rng.random_range(0..=255);
             let g_val = rng.random_range(0..=255);
             let b_val = rng.random_range(0..=255);
 
-            world.spawn((
-                Position {
-                    x: rand_pos_x,
-                    y: rand_pos_y,
-                },
-                Velocity {
-                    x: 300.0 + rand_vel_x,
-                    y: 150.0 + rand_vel_y,
-                },
+            // A. Spawn the Entity first
+            let id = world.spawn((
+                Position(Vec2::new(rand_pos_x, rand_pos_y)),
+                Velocity(Vec2::new(rand_vel_x, rand_vel_y)),
                 AgentSize { radius: 10.0 },
                 AgentColor {
                     r: r_val,
@@ -97,36 +120,58 @@ impl Engine {
                     b: b_val,
                 },
             ));
+
+            let mut mask = SignalMask::default();
+            mask.set(BIT_RENDER, true);
+
+            let sig_key = signal_layer.emit(Signal {
+                entity: id,
+                origin: Vec2::new(rand_pos_x, rand_pos_y),
+                outer_radius: 10.0, // Use the agent's physical size
+                inner_radius: 0.0,
+                intensity: 0.0, // Doesn't "glow", just exists
+                falloff: 0.0,
+                mask,
+            });
+
+            // C. Link the SignalKey to the Entity so they stay in sync during movement
+            world
+                .insert_one(id, SignalEmitter { signal_id: sig_key })
+                .unwrap();
         }
 
         // 2. Spawn THE CHOSEN ONE (With Signal)
         // Let's make it stand out (Red Color, Center Screen)
-        let hero_pos = [512.0, 384.0];
+        let hero_pos = Vec2::new(512.0, 384.0);
 
-        // A. Create the Signal first
+        // 1. Spawn the Hero (without the emitter initially)
+        let hero_id = world.spawn((
+            Position(Vec2::new(hero_pos[0], hero_pos[1])),
+            Velocity(Vec2::new(200.0, 200.0)),
+            AgentSize { radius: 15.0 },
+            AgentColor { r: 255, g: 0, b: 0 },
+            // We leave SignalEmitter out for a split second
+        ));
+
+        // 2. Create the Signal tied to that ID
         let mut mask = SignalMask::default();
-        mask.set(0, true); // Bit 0 = Red Color in your GUI
-
+        mask.set(BIT_RENDER, true); // Bit 0 = Red Color in your GUI
+        mask.set(BIT_PASSIVE, true); // Bit 0 = Red Color in your GUI
         let sig_key = signal_layer.emit(Signal {
+            entity: hero_id, // Link: Signal -> Entity
             origin: hero_pos,
-            outer_radius: 150.0, // Big Radius
-            inner_radius: 120.0, // Ring effect
+            outer_radius: 550.0,
+            inner_radius: 120.0,
             intensity: 1.0,
             falloff: 0.5,
             mask,
         });
 
-        // B. Spawn the Entity with the Link
-        world.spawn((
-            Position {
-                x: hero_pos[0],
-                y: hero_pos[1],
-            },
-            Velocity { x: 200.0, y: 200.0 },      // Moving fast
-            AgentSize { radius: 15.0 },           // Slightly bigger
-            AgentColor { r: 255, g: 0, b: 0 },    // Red Agent
-            SignalEmitter { signal_id: sig_key }, // <--- THE LINK
-        ));
+        // 3. Link back: Entity -> Signal
+        // This adds the component to the existing entity
+        world
+            .insert_one(hero_id, SignalEmitter { signal_id: sig_key })
+            .unwrap();
 
         Self {
             dummy_background_value: 0.0,
@@ -135,7 +180,8 @@ impl Engine {
             tick_counter: 0,
             time_accumulator: 0.0,
             signal_layer, // Store the layer
-            camera_dimension: [width, height],
+            camera_dimension: Vec2::new(width, height),
+            camera_position: Vec2::new(0.0, 0.0),
         }
     }
 
@@ -154,10 +200,6 @@ impl Engine {
         // the logic inside the while loop is currently too fast for this to happen,
         // but it will stay here in case of future needs
         if self.time_accumulator > 0.25 {
-            println!(
-                "Your simulation is running too slow ({})! slowing time down...",
-                self.time_accumulator
-            );
             self.time_accumulator = 0.25;
         }
 
@@ -197,8 +239,8 @@ impl Engine {
                 // We split the borrow here: 'pos' is from 'world', 'reposition' is on 'signal_layer'
                 self.signal_layer.reposition(
                     emitter.signal_id,
-                    [pos.x, pos.y],
-                    150.0, // Keep the radius constant (or pulse it here!)
+                    *(*pos),
+                    550.0, // Keep the radius constant (or pulse it here!)
                 );
             }
 
@@ -209,72 +251,54 @@ impl Engine {
 
     pub fn render(&self, frame: &mut FrameData) {
         let start_render = Instant::now();
-        let view = &mut frame.view_bufffer;
 
-        // Sanity check to ensure buffer is big enough (resizes only if screen size changed)
-        let required_size = view.width * view.height * 4;
-        if view.pixels.len() != required_size {
-            println!(
-                "resize happened: {} -> {}",
-                view.pixels.len(),
-                required_size
-            );
-            view.pixels.resize(required_size, 0);
-        }
+        // 1. Prepare for new frame
+        frame.agents.clear();
+        frame.signals.clear();
 
-        // 2. Render the background
-        // _dummy_image_checkerboard(&mut view.pixels, view.width, self.dummy_background_value);
-        view.pixels.fill(0);
+        let mut signal_mask = SignalMask::default();
+        signal_mask.set(BIT_RENDER, true);
+        signal_mask.set(BIT_PASSIVE, true);
 
-        // 3. Render the Lagrangian Agents (The ECS Entities)
-        // We query purely for read access here
-        for (_id, (pos, size, color)) in
-            &mut self.world.query::<(&Position, &AgentSize, &AgentColor)>()
-        {
-            // Simple rasterization of a circle/square at pos.x/y
-            render_agent(frame, pos, size, color);
-        }
+        let mut layer_mask = SignalMask::default();
+        layer_mask.fill(true);
 
-        // 4. Debug info
-        // Store in FrameData to send to UI
-        frame.debug_info.render_time_ms = start_render.elapsed().as_secs_f32() * 1000.0;
+        let mut filter = SignalMask::<1>::default();
+        filter.set(BIT_RENDER, true);
+
+        // 2. Spatial Query
+        // We only care about agents the camera can actually see
+        self.signal_layer.scan_volume(
+            self.camera_position,
+            self.camera_dimension + self.camera_position,
+            signal_mask,
+            layer_mask,
+            |signal| {
+                // A. Store signal for the GUI/Debug overlays
+                if signal.mask != filter {
+                    frame.signals.push(signal.clone());
+                }
+
+                // B. Fetch visual data from ECS for the GPU
+                if let Ok(mut query) = self
+                    .world
+                    .query_one::<(&Position, &AgentSize, &AgentColor)>(signal.entity)
+                {
+                    if let Some((pos, size, color)) = query.get() {
+                        frame.agents.push(AgentPoint {
+                            position: **pos,
+                            radius: size.radius,
+                            color: [color.r, color.g, color.b, 255],
+                        });
+                    }
+                }
+            },
+        );
+
+        // 3. Metadata
         frame.debug_info.tick_counter = self.tick_counter;
         frame.debug_info.agent_count = self.world.len() as usize;
-
-        // 5. field
-        let mut mask = SignalMask::default();
-        mask.fill(true);
-        let signals = self.signal_layer.query_snapshot(
-            Viewport {
-                min: [0.0, 0.0],
-                max: [self.camera_dimension[0], self.camera_dimension[1]],
-            },
-            &mask,
-        );
-        frame.signals = signals;
-    }
-}
-
-// Helper to draw agents onto the pixel buffer
-fn render_agent(frame: &mut FrameData, pos: &Position, size: &AgentSize, color: &AgentColor) {
-    let center_x = pos.x as isize;
-    let center_y = pos.y as isize;
-    let r = size.radius as isize;
-    let view = &mut frame.view_bufffer;
-    let width = view.width as isize;
-
-    // Naive box drawing for prototype
-    for y in (center_y - r)..=(center_y + r) {
-        for x in (center_x - r)..=(center_x + r) {
-            if x >= 0 && x < width && y >= 0 && y < view.height as isize {
-                let idx = ((y * width + x) * 4) as usize;
-                // Draw Green Agent
-                view.pixels[idx] = (color.r as f32 * 0.7) as u8;
-                view.pixels[idx + 1] = (color.g as f32 * 0.7) as u8;
-                view.pixels[idx + 2] = (color.b as f32 * 0.7) as u8;
-                view.pixels[idx + 3] = 255;
-            }
-        }
+        frame.debug_info.render_time_ms = start_render.elapsed().as_secs_f32() * 1000.0;
     }
 }
 

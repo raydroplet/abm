@@ -7,7 +7,7 @@ edition = "2024"
 bitflags = "2.10.0"
 bitvec = "1.0.1"
 crossbeam-channel = "0.5.15"
-eframe = "0.33.3"
+eframe = { version = "0.33.3", features = ["glow"] }
 glam = "0.30.10"
 hecs = "0.10.5"
 rand = "0.9.2"

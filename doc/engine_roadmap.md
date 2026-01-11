@@ -15,12 +15,11 @@
 - demo: particle bouncing
 
 ### 0.3 (waves)
-- core: `rayon`
 - features
   - wave propagation
   - influece fields
   - agent interactions
-    - waves: reflection, absorption
+    - waves: reflection, occlusion
     - logic: field perception and decision making
     - rotation
 - demo: the dark room

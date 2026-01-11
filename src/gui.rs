@@ -1,6 +1,6 @@
 // gui.rs
 
-use crate::engine::{DebugInfo, Engine, FrameData, ViewBuffer};
+use crate::engine::{AgentPoint, DebugInfo, Engine, FrameData};
 use crate::wave::Signal;
 
 pub use crossbeam_channel as crossbeam;
@@ -62,15 +62,19 @@ impl Producer {
 pub struct Presenter {
     receiver: crossbeam::Receiver<FrameData>,
     returner: crossbeam::Sender<FrameData>,
-    view_texture: Option<egui::TextureHandle>,
     //
     latest_debug_info: DebugInfo,
     latest_signals: Vec<Signal>,
+    latest_agents: Vec<AgentPoint>,
     //
     // UPS (Physics) Smoothing
     last_tick_count: u64,   // Snapshot of total ticks 0.5s ago
     last_measure_time: f64, // Timestamp of the last check
     display_ups: u64,
+    //
+    // local "Double Buffer"
+    // It stays here so we can draw it even if the engine is busy ticking.
+    current_frame: Option<FrameData>,
 }
 
 impl Presenter {
@@ -81,14 +85,16 @@ impl Presenter {
         Self {
             receiver: frame_receiver,
             returner: frame_returner,
-            view_texture: None,
             //
             latest_debug_info: DebugInfo::default(),
             latest_signals: Vec::default(),
+            latest_agents: Vec::new(),
             //
             last_tick_count: 0,
             last_measure_time: 0.0,
             display_ups: 0,
+            //
+            current_frame: Option::default(),
         }
     }
 
@@ -96,15 +102,10 @@ impl Presenter {
         // frames
         let width: usize = 1024;
         let height: usize = 768;
-        let buffer_size = width * height * 4; // fine for now
 
         for _ in 0..2 {
             let _ = self.returner.send(FrameData {
-                view_bufffer: ViewBuffer {
-                    width: width,
-                    height: height,
-                    pixels: vec![0; buffer_size],
-                },
+                agents: Vec::new(),
                 signals: Vec::new(),
                 debug_info: DebugInfo::default(),
             });
@@ -129,58 +130,124 @@ impl Presenter {
             }),
         )
     }
+
+    fn resolve_signal_color(sig: &Signal, alpha: u8) -> egui::Color32 {
+        match sig.mask.trailing_zeros() {
+            0 => egui::Color32::from_rgba_unmultiplied(255, 50, 50, alpha), // Bit 0: Red (Sound)
+            1 => egui::Color32::from_rgba_unmultiplied(50, 255, 50, alpha), // Bit 1: Green (Smell)
+            2 => egui::Color32::from_rgba_unmultiplied(50, 100, 255, alpha), // Bit 2: Blue (Radio)
+            3 => egui::Color32::from_rgba_unmultiplied(255, 255, 0, alpha), // Bit 3: Yellow (Light)
+            4 => egui::Color32::from_rgba_unmultiplied(255, 0, 255, alpha), // Bit 4: Magenta (Magic)
+            5 => egui::Color32::from_rgba_unmultiplied(0, 255, 255, alpha), // Bit 5: Cyan (Electric)
+            6 => egui::Color32::from_rgba_unmultiplied(255, 140, 0, alpha), // Bit 6: Orange (Heat)
+            7 => egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha), // Bit 7: White (Debug)
+            _ => egui::Color32::from_gray(alpha), // Should effectively never happen
+        }
+    }
+
+    fn render_debug_window(&self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        egui::Window::new("📊 Signal Engine Monitor")
+            .resizable(false)
+            .collapsible(true)
+            .default_pos([10.0, 10.0])
+            .show(ctx, |ui| {
+                // 1. Performance Metrics
+                let fps = 1.0 / ctx.input(|i| i.stable_dt);
+                ui.horizontal(|ui| {
+                    ui.label("GUI FPS:");
+                    ui.colored_label(egui::Color32::LIGHT_BLUE, format!("{:.0}", fps));
+                });
+
+                ui.horizontal(|ui| {
+                    let engine_fps = 1000.0 / self.latest_debug_info.render_time_ms;
+                    ui.label("Potential FPS:");
+                    ui.colored_label(
+                        egui::Color32::LIGHT_BLUE,
+                        format!("{:.0}", engine_fps),
+                    );
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Simulation UPS:");
+                    ui.colored_label(egui::Color32::LIGHT_GREEN, format!("{}", self.display_ups));
+                });
+
+                // ui.separator();
+
+                let engine_ms = self.latest_debug_info.render_time_ms;
+                ui.horizontal(|ui| {
+                    ui.label("Engine Render Time:");
+                    ui.colored_label(
+                        if engine_ms > 5.0 {
+                            egui::Color32::KHAKI
+                        } else {
+                            egui::Color32::WHITE
+                        },
+                        format!("{:.2}ms", engine_ms),
+                    );
+                });
+
+                ui.separator();
+
+                let wave_count = self.latest_signals.len();
+
+                // 2. Spatial Entity Stats
+                ui.label(format!(
+                    "Total Entities: {}",
+                    self.latest_debug_info.agent_count
+                ));
+                ui.label(format!("Visible Waves:  {}", wave_count));
+
+                // This confirms your SignalField culling is working
+                ui.label(format!(
+                    "Ticks Elapsed:  {}",
+                    self.latest_debug_info.tick_counter
+                ));
+
+                if ui.button("Reset Simulation").clicked() {
+                    // You could emit an event here to the engine
+                }
+            });
+    }
 }
 
 impl eframe::App for Presenter {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // ---------------------------------------------------------------------
-        // 1. DATA SYNC
+        // 1. DATA SYNC (Zero-Clone Buffer Swapping)
         // ---------------------------------------------------------------------
-        let mut latest = None;
 
-        // Drain channel to get the absolutely newest frame
+        // Drain the channel to get the newest frame
+        let mut newest_arrived = None;
         while let Ok(frame) = self.receiver.try_recv() {
-            if let Some(old) = latest {
-                let _ = self.returner.send(old); // Recycle skipped frames
+            // If we already pulled a frame this loop but another is waiting,
+            // send the intermediate one back immediately so the engine doesn't starve.
+            if let Some(old) = newest_arrived.replace(frame) {
+                let _ = self.returner.send(old);
             }
-            latest = Some(frame);
         }
 
-        // If we got new data, update our local state
-        if let Some(frame) = latest {
-            let view = &frame.view_bufffer;
+        // If a new frame arrived, swap it into our 'current_frame' storage
+        if let Some(new_frame) = newest_arrived {
+            // replace() returns the old Some(FrameData). We send it back to the engine.
+            if let Some(old_buffer) = self.current_frame.replace(new_frame) {
+                let _ = self.returner.send(old_buffer);
+            }
+        }
 
-            // A. Update Agents Texture (Pixel Buffer)
-            let view_image =
-                egui::ColorImage::from_rgba_unmultiplied([view.width, view.height], &view.pixels);
-
-            match &mut self.view_texture {
-                Some(t) => t.set(view_image, egui::TextureOptions::NEAREST),
-                None => {
-                    self.view_texture =
-                        Some(ctx.load_texture("agents", view_image, egui::TextureOptions::NEAREST));
-                }
-            };
-
-            // B. Store Wave Data (Vector Data)
-            self.latest_signals = frame.signals.clone();
-
-            // C. Store Stats
+        // Update debug info from whichever frame is currently active
+        if let Some(frame) = &self.current_frame {
             self.latest_debug_info = frame.debug_info;
-
-            // D. Recycle the frame buffer back to Engine
-            let _ = self.returner.send(frame);
         }
 
         // ---------------------------------------------------------------------
-        // 2. PHYSICS RATE CALCULATION (UPS)
+        // 2. PHYSICS RATE CALCULATION (UPS) - Keep as is
         // ---------------------------------------------------------------------
         let time = ctx.input(|i| i.time);
         if time - self.last_measure_time >= 0.5 {
             let current_total = self.latest_debug_info.tick_counter;
             let ticks_passed = current_total.wrapping_sub(self.last_tick_count);
             let time_passed = (time - self.last_measure_time) as f64;
-
             self.display_ups = (ticks_passed as f64 / time_passed) as u64;
             self.last_tick_count = current_total;
             self.last_measure_time = time;
@@ -190,82 +257,54 @@ impl eframe::App for Presenter {
         // 3. RENDER LOOP
         // ---------------------------------------------------------------------
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(egui::Color32::BLACK))
+            .frame(egui::Frame::new().fill(egui::Color32::from_rgb(10, 10, 15)))
             .show(ctx, |ui| {
-                // --- LAYER 1: WAVES (Vector Graphics) ---
-                // We draw this first so it appears "behind" the agents.
-                // Inside egui::CentralPanel...
                 let painter = ui.painter();
 
-                for sig in &self.latest_signals {
-                    // Renamed from circles
+                // We only render if we actually have a frame buffer
+                if let Some(frame) = &self.current_frame {
+                    // --- LAYER 1: WAVES ---
+                    for sig in &frame.signals {
+                        let alpha = (sig.intensity * 255.0) as u8;
+                        let color = Self::resolve_signal_color(sig, alpha);
 
-                    // 1. Calculate Opacity based on Strength
-                    // We clamp it so it doesn't vanish completely or become solid rock.
-                    let alpha = (sig.intensity * 255.0).clamp(0.0, 255.0) as u8;
+                        if sig.inner_radius > 0.5 {
+                            let thickness = sig.outer_radius - sig.inner_radius;
+                            let center_radius = sig.inner_radius + (thickness / 2.0);
+                            painter.circle_stroke(
+                                egui::pos2(sig.origin.x, sig.origin.y),
+                                center_radius,
+                                egui::Stroke::new(thickness, color),
+                            );
+                        } else {
+                            painter.circle_filled(
+                                egui::pos2(sig.origin.x, sig.origin.y),
+                                sig.outer_radius,
+                                color,
+                            );
+                        }
+                    }
 
-                    // 2. Resolve Color
-                    let base_color = match sig.mask.trailing_zeros() {
-                        0 => egui::Color32::from_rgba_unmultiplied(255, 50, 50, alpha), // Bit 0: Red (Sound)
-                        1 => egui::Color32::from_rgba_unmultiplied(50, 255, 50, alpha), // Bit 1: Green (Smell)
-                        2 => egui::Color32::from_rgba_unmultiplied(50, 100, 255, alpha), // Bit 2: Blue (Radio)
-                        3 => egui::Color32::from_rgba_unmultiplied(255, 255, 0, alpha), // Bit 3: Yellow (Light)
-                        4 => egui::Color32::from_rgba_unmultiplied(255, 0, 255, alpha), // Bit 4: Magenta (Magic)
-                        5 => egui::Color32::from_rgba_unmultiplied(0, 255, 255, alpha), // Bit 5: Cyan (Electric)
-                        6 => egui::Color32::from_rgba_unmultiplied(255, 140, 0, alpha), // Bit 6: Orange (Heat)
-                        7 => egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha), // Bit 7: White (Debug)
-                        _ => egui::Color32::from_gray(alpha), // Should effectively never happen
-                    };
-
-                    // 3. Render Logic: RING vs CIRCLE
-                    if sig.inner_radius > 0.5 {
-                        // --- IT IS A WAVE (RING) ---
-                        // We use a thick stroke to simulate the "body" of the wave.
-
-                        let thickness = sig.outer_radius - sig.inner_radius;
-                        let center_radius = sig.inner_radius + (thickness / 2.0);
-
-                        painter.circle_stroke(
-                            egui::pos2(sig.origin[0], sig.origin[1]),
-                            center_radius,
-                            egui::Stroke::new(thickness, base_color),
-                        );
-                    } else {
-                        // --- IT IS A SOURCE (SOLID CIRCLE) ---
-                        painter.circle_filled(
-                            egui::pos2(sig.origin[0], sig.origin[1]),
-                            sig.outer_radius,
-                            base_color,
-                        );
+                    // --- LAYER 2: AGENTS ---
+                    if let Some(frame) = &self.current_frame {
+                        for agent in &frame.agents {
+                            painter.circle_filled(
+                                egui::pos2(agent.position.x, agent.position.y),
+                                agent.radius,
+                                egui::Color32::from_rgba_unmultiplied(
+                                    agent.color[0],
+                                    agent.color[1],
+                                    agent.color[2],
+                                    agent.color[3],
+                                ),
+                            );
+                        }
                     }
                 }
 
-                // --- LAYER 2: AGENTS (Texture Overlay) ---
-                if let Some(agent_tex) = &self.view_texture {
-                    // Draw the image filling the entire window
-                    ui.image(agent_tex);
-                }
-
                 // --- LAYER 3: DEBUG UI ---
-                egui::Window::new("Debug Info")
-                    .resizable(false)
-                    .collapsible(false)
-                    .default_pos([10.0, 10.0])
-                    .show(ctx, |ui| {
-                        let fps = 1.0 / ctx.input(|i| i.stable_dt);
-                        ui.label(format!("Render FPS: {:.0}", fps));
+                self.render_debug_window(ui, ctx);
 
-                        let engine_fps = 1000.0 / self.latest_debug_info.render_time_ms;
-                        ui.label(format!("Potential FPS: {:.0}", engine_fps));
-                        ui.label(format!("UPS: {:.0}", self.display_ups));
-
-                        ui.separator();
-                        ui.label(format!("Ticks: {}", self.latest_debug_info.tick_counter));
-                        ui.label(format!("Agents: {}", self.latest_debug_info.agent_count));
-                        ui.label(format!("Waves: {}", self.latest_signals.len()));
-                    });
-
-                // Force constant repaint to hit 60 FPS
                 ctx.request_repaint();
             });
     }
