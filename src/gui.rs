@@ -64,7 +64,6 @@ pub struct Presenter {
     returner: crossbeam::Sender<FrameData>,
     //
     latest_debug_info: DebugInfo,
-    latest_signals: Vec<Signal>,
     latest_agents: Vec<AgentPoint>,
     //
     // UPS (Physics) Smoothing
@@ -87,7 +86,6 @@ impl Presenter {
             returner: frame_returner,
             //
             latest_debug_info: DebugInfo::default(),
-            latest_signals: Vec::default(),
             latest_agents: Vec::new(),
             //
             last_tick_count: 0,
@@ -161,10 +159,7 @@ impl Presenter {
                 ui.horizontal(|ui| {
                     let engine_fps = 1000.0 / self.latest_debug_info.render_time_ms;
                     ui.label("Potential FPS:");
-                    ui.colored_label(
-                        egui::Color32::LIGHT_BLUE,
-                        format!("{:.0}", engine_fps),
-                    );
+                    ui.colored_label(egui::Color32::LIGHT_BLUE, format!("{:.0}", engine_fps));
                 });
 
                 ui.horizontal(|ui| {
@@ -187,9 +182,24 @@ impl Presenter {
                     );
                 });
 
+                ui.horizontal(|ui| {
+                    let phys_ms = self.latest_debug_info.tick_time_ms;
+                    ui.label("Physics Time:");
+                    ui.colored_label(
+                        // If physics takes > 8ms, we are dangerously close to
+                        // missing the 10ms deadline (100 ticks/sec)
+                        if phys_ms > 8.0 {
+                            egui::Color32::RED
+                        } else {
+                            egui::Color32::LIGHT_GREEN
+                        },
+                        format!("{:.3}ms", phys_ms),
+                    );
+                });
+
                 ui.separator();
 
-                let wave_count = self.latest_signals.len();
+                let wave_count = self.latest_debug_info.agent_count;
 
                 // 2. Spatial Entity Stats
                 ui.label(format!(

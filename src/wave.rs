@@ -134,8 +134,7 @@ impl SignalField {
 
     /// MOVE: Keeps Key, Updates Position
     pub fn reposition(&mut self, key: SignalKey, new_pos: Vec2, new_radius: f32) {
-        // 1. SPLIT SELF (The Magic Step)
-        // We unpack the struct so we can borrow fields independently.
+        // 1. SPLIT SELF
         let Self {
             store,
             grid,
@@ -145,31 +144,52 @@ impl SignalField {
         } = self;
 
         // 2. Get the signal (Mutable Borrow of STORE)
-        // We can hold this reference because we aren't passing 'store' to the helpers.
         let signal = if let Some(sig) = store.get_mut(key) {
             sig
         } else {
             return;
         };
 
-        // 3. Remove from OLD grid using current data
-        // We pass 'grid' separately. 'signal' is still alive and readable.
+        // insanely efficient for high agent count, surprisingly
+        // ---------------------------------------------------------------------
+        // OPTIMIZATION START
+        // ---------------------------------------------------------------------
+
+        // Calculate the Spatial Hash for where it IS vs where it WANTS TO BE
+        let old_tile = Self::get_coordinates(signal.outer_radius, signal.origin);
+        let new_tile = Self::get_coordinates(new_radius, new_pos);
+
+        // If the agent moved, but didn't cross a grid boundary, we skip the HashMap thrashing.
+        // The Grid points to the SignalKey, and the SignalKey is still valid.
+        // We only update the raw data in 'store'.
+        if old_tile == new_tile {
+            signal.origin = new_pos;
+            signal.outer_radius = new_radius;
+            return;
+        }
+
+        // ---------------------------------------------------------------------
+        // OPTIMIZATION END (Fallback to Slow Path)
+        // ---------------------------------------------------------------------
+
+        // 3. Remove from OLD grid using OLD coordinates (derived from signal data before update)
+        // We manually reproduce the logic of internal_remove to avoid borrow checker wars,
+        // or just call it if arguments align (they do).
         Self::internal_remove(
             grid,
             active_levels,
             level_counts,
             key,
-            signal.outer_radius,
-            signal.origin,
+            signal.outer_radius, // Pass OLD radius
+            signal.origin,       // Pass OLD origin
         );
 
         // 4. Update the Signal (In Place)
-        // No cloning needed. We are writing directly to the heap memory.
         signal.origin = new_pos;
         signal.outer_radius = new_radius;
 
         // 5. Add to NEW grid
-        // We pass the updated 'signal' reference.
+        // internal_add calculates the key based on the *current* signal state, which we just updated.
         Self::internal_add(grid, active_levels, level_counts, key, signal);
     }
 

@@ -21,11 +21,13 @@ pub struct Engine {
     //
     tick_counter: u64,     // overflows in ~584,000 years at 1.000.000hz
     time_accumulator: f32, //
+    last_tick_time_ms: f32, //
     //
     signal_layer: SignalField,
     //
     camera_dimension: Vec2,
     camera_position: Vec2,
+    //
 }
 
 #[derive(Default, Clone, Copy)]
@@ -33,6 +35,7 @@ pub struct DebugInfo {
     pub tick_counter: u64,   // overflows in ~584,000 years at 1.000.000hz
     pub agent_count: usize,  // Useful since you are using ECS
     pub render_time_ms: f32, // Render time
+    pub tick_time_ms: f32, //
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -99,7 +102,7 @@ impl Engine {
         let mut rng = rand::rng();
 
         // 1. Spawn 1000 "Dummy" Agents (No Signal)
-        for _ in 0..1000 {
+        for _ in 0..10000 {
             // ... (Your existing random generation code) ...
             let rand_pos_x = rng.random_range(0.0..width);
             let rand_pos_y = rng.random_range(0.0..height);
@@ -179,6 +182,7 @@ impl Engine {
             last_update: Instant::now(),
             tick_counter: 0,
             time_accumulator: 0.0,
+            last_tick_time_ms: 0.0,
             signal_layer, // Store the layer
             camera_dimension: Vec2::new(width, height),
             camera_position: Vec2::new(0.0, 0.0),
@@ -206,6 +210,7 @@ impl Engine {
         // fixed update loop
         // We only update physics in chunks of FIXED_DT (e.g., 0.0166s)
         while self.time_accumulator >= FIXED_DT {
+            let tick_time = Instant::now();
             self.dummy_background_value += 60.0 * FIXED_DT;
 
             // 1. MOVEMENT LOOP (Updates Position)
@@ -246,6 +251,8 @@ impl Engine {
 
             self.time_accumulator -= FIXED_DT;
             self.tick_counter += 1;
+
+            self.last_tick_time_ms = tick_time.elapsed().as_secs_f32() * 1000.0;
         }
     }
 
@@ -299,6 +306,8 @@ impl Engine {
         frame.debug_info.tick_counter = self.tick_counter;
         frame.debug_info.agent_count = self.world.len() as usize;
         frame.debug_info.render_time_ms = start_render.elapsed().as_secs_f32() * 1000.0;
+        //
+        frame.debug_info.tick_time_ms = self.last_tick_time_ms;
     }
 }
 
