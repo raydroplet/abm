@@ -100,7 +100,7 @@ impl Presenter {
 
         for _ in 0..2 {
             let _ = self.returner.send(FrameData {
-                view_bufffer: ViewBuffer {
+                view_buffer: ViewBuffer {
                     width: width,
                     height: height,
                     pixels: vec![0; buffer_size],
@@ -148,7 +148,7 @@ impl eframe::App for Presenter {
 
         // If we got new data, update our local state
         if let Some(frame) = latest {
-            let view = &frame.view_bufffer;
+            let view = &frame.view_buffer;
 
             // A. Update Agents Texture (Pixel Buffer)
             let view_image =

@@ -1,11 +1,12 @@
 // engine.rs
 
-use crate::wave::{Signal, SignalKey, SignalLayer, SignalMask, Viewport};
+use crate::wave::{Signal, SignalKey, SignalField, SignalMask};
 
 use hecs::World;
 use rand::Rng;
 // use std::thread;
 use std::time::Instant;
+use glam::{Vec2};
 
 const FIXED_DT: f32 = 1.0 / 60.0; // Run physics exactly 60 times a second
 //
@@ -17,9 +18,10 @@ pub struct Engine {
     tick_counter: u64,     // overflows in ~584,000 years at 1.000.000hz
     time_accumulator: f32, //
     //
-    signal_layer: SignalLayer<1>,
+    signal_layer: SignalField<1>,
     //
-    camera_dimension: [f32; 2],
+    camera_dimension: Vec2,
+    camera_position: Vec2,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -36,20 +38,14 @@ pub struct ViewBuffer {
 }
 
 pub struct FrameData {
-    pub view_bufffer: ViewBuffer,
+    pub view_buffer: ViewBuffer,
     pub signals: Vec<Signal>,
     pub debug_info: DebugInfo,
 }
 
 // --- Components (The Data) ---
-pub struct Position {
-    pub x: f32,
-    pub y: f32,
-}
-pub struct Velocity {
-    pub x: f32,
-    pub y: f32,
-}
+type Position = Vec2;
+type Velocity = Vec2;
 pub struct AgentSize {
     pub radius: f32,
 }
@@ -65,7 +61,7 @@ pub struct SignalEmitter {
 impl Engine {
     pub fn new() -> Self {
         let mut world = World::new();
-        let mut signal_layer = SignalLayer::new(); // User variable name
+        let mut signal_layer = SignalField::new(); // User variable name
         let width = 1024.0;
         let height = 768.0;
         let mut rng = rand::rng();
@@ -101,7 +97,7 @@ impl Engine {
 
         // 2. Spawn THE CHOSEN ONE (With Signal)
         // Let's make it stand out (Red Color, Center Screen)
-        let hero_pos = [512.0, 384.0];
+        let hero_pos = Vec2::new(512.0, 384.0);
 
         // A. Create the Signal first
         let mut mask = SignalMask::default();
@@ -109,7 +105,7 @@ impl Engine {
 
         let sig_key = signal_layer.emit(Signal {
             origin: hero_pos,
-            outer_radius: 150.0, // Big Radius
+            outer_radius: 550.0, // Big Radius
             inner_radius: 120.0, // Ring effect
             intensity: 1.0,
             falloff: 0.5,
@@ -135,7 +131,8 @@ impl Engine {
             tick_counter: 0,
             time_accumulator: 0.0,
             signal_layer, // Store the layer
-            camera_dimension: [width, height],
+            camera_dimension: Vec2::new(width, height),
+            camera_position: Vec2::new(0.0, 0.0),
         }
     }
 
@@ -197,8 +194,8 @@ impl Engine {
                 // We split the borrow here: 'pos' is from 'world', 'reposition' is on 'signal_layer'
                 self.signal_layer.reposition(
                     emitter.signal_id,
-                    [pos.x, pos.y],
-                    150.0, // Keep the radius constant (or pulse it here!)
+                    *pos,
+                    550.0, // Keep the radius constant (or pulse it here!)
                 );
             }
 
@@ -209,49 +206,23 @@ impl Engine {
 
     pub fn render(&self, frame: &mut FrameData) {
         let start_render = Instant::now();
-        let view = &mut frame.view_bufffer;
 
-        // Sanity check to ensure buffer is big enough (resizes only if screen size changed)
-        let required_size = view.width * view.height * 4;
-        if view.pixels.len() != required_size {
-            println!(
-                "resize happened: {} -> {}",
-                view.pixels.len(),
-                required_size
-            );
-            view.pixels.resize(required_size, 0);
-        }
+        let mut mask = SignalMask::default();
+        mask.fill(true);
 
-        // 2. Render the background
-        // _dummy_image_checkerboard(&mut view.pixels, view.width, self.dummy_background_value);
-        view.pixels.fill(0);
+        // Camera view
+        let signals = self.signal_layer.scan_volume(
+            self.camera_position,
+            self.camera_dimension + self.camera_position,
+            &mask,
+        );
+        frame.signals = signals;
 
-        // 3. Render the Lagrangian Agents (The ECS Entities)
-        // We query purely for read access here
-        for (_id, (pos, size, color)) in
-            &mut self.world.query::<(&Position, &AgentSize, &AgentColor)>()
-        {
-            // Simple rasterization of a circle/square at pos.x/y
-            render_agent(frame, pos, size, color);
-        }
-
-        // 4. Debug info
+        // Debug info
         // Store in FrameData to send to UI
         frame.debug_info.render_time_ms = start_render.elapsed().as_secs_f32() * 1000.0;
         frame.debug_info.tick_counter = self.tick_counter;
         frame.debug_info.agent_count = self.world.len() as usize;
-
-        // 5. field
-        let mut mask = SignalMask::default();
-        mask.fill(true);
-        let signals = self.signal_layer.query_snapshot(
-            Viewport {
-                min: [0.0, 0.0],
-                max: [self.camera_dimension[0], self.camera_dimension[1]],
-            },
-            &mask,
-        );
-        frame.signals = signals;
     }
 }
 
@@ -260,7 +231,7 @@ fn render_agent(frame: &mut FrameData, pos: &Position, size: &AgentSize, color: 
     let center_x = pos.x as isize;
     let center_y = pos.y as isize;
     let r = size.radius as isize;
-    let view = &mut frame.view_bufffer;
+    let view = &mut frame.view_buffer;
     let width = view.width as isize;
 
     // Naive box drawing for prototype
