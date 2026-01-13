@@ -15,8 +15,8 @@ const LEVEL_COUNT: usize = 64;
 pub type LevelCount<const N: usize = 1> = [u32; LEVEL_COUNT];
 pub type SignalMask<const N: usize = 1> = BitArray<[u64; N]>;
 pub type LayerMask<const N: usize = 1> = BitArray<[u64; N]>;
-type Bucket<const N: usize = 1> = SmallVec<[(SignalKey, SignalMask); 4]>; // The Bucket: A list of (ID, Mask) tuples
-type SpatialGrid<const N: usize = 1> = FxHashMap<TileKey, Bucket>; // The Grid: Map of Coordinates -> Bucket
+pub type Bucket<const N: usize = 1> = SmallVec<[(SignalKey, SignalMask); 4]>; // The Bucket: A list of (ID, Mask) tuples
+pub type SpatialGrid<const N: usize = 1> = FxHashMap<TileKey, Bucket>; // The Grid: Map of Coordinates -> Bucket
 
 new_key_type! { pub struct SignalKey; }
 
@@ -24,7 +24,7 @@ new_key_type! { pub struct SignalKey; }
 // x,y: grid positions for this tile
 //
 #[derive(Hash, PartialEq, Eq, Clone, Copy, Debug)]
-struct TileKey {
+pub struct TileKey {
     level: u8,
     x: i32,
     y: i32,
@@ -150,7 +150,7 @@ impl SignalField {
             return;
         };
 
-        // insanely efficient for high agent count, surprisingly
+        // insanely efficient for high agent count
         // ---------------------------------------------------------------------
         // OPTIMIZATION START
         // ---------------------------------------------------------------------

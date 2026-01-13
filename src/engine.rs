@@ -116,7 +116,7 @@ impl Engine {
             let id = world.spawn((
                 Position(Vec2::new(rand_pos_x, rand_pos_y)),
                 Velocity(Vec2::new(rand_vel_x, rand_vel_y)),
-                AgentSize { radius: 10.0 },
+                AgentSize { radius: 2.0 },
                 AgentColor {
                     r: r_val,
                     g: g_val,
@@ -132,7 +132,7 @@ impl Engine {
                 origin: Vec2::new(rand_pos_x, rand_pos_y),
                 outer_radius: 10.0, // Use the agent's physical size
                 inner_radius: 0.0,
-                intensity: 0.0, // Doesn't "glow", just exists
+                intensity: 1.0, // Doesn't "glow", just exists
                 falloff: 0.0,
                 mask,
             });
@@ -239,13 +239,13 @@ impl Engine {
 
             // 2. SIGNAL SYNC LOOP (Updates SignalLayer)
             // We iterate over entities that have BOTH Position and Emitter
-            for (_id, (pos, emitter)) in self.world.query_mut::<(&Position, &SignalEmitter)>() {
+            for (_id, (pos, size, emitter)) in self.world.query_mut::<(&Position, &AgentSize, &SignalEmitter)>() {
                 // Reposition the signal to match the agent
                 // We split the borrow here: 'pos' is from 'world', 'reposition' is on 'signal_layer'
                 self.signal_layer.reposition(
                     emitter.signal_id,
                     *(*pos),
-                    550.0, // Keep the radius constant (or pulse it here!)
+                    size.radius, // Keep the radius constant (or pulse it here!)
                 );
             }
 
@@ -270,8 +270,8 @@ impl Engine {
         let mut layer_mask = SignalMask::default();
         layer_mask.fill(true);
 
-        let mut filter = SignalMask::<1>::default();
-        filter.set(BIT_RENDER, true);
+        // let mut filter = SignalMask::<1>::default();
+        // filter.set(BIT_RENDER, true);
 
         // 2. Spatial Query
         // We only care about agents the camera can actually see
@@ -282,9 +282,9 @@ impl Engine {
             layer_mask,
             |signal| {
                 // A. Store signal for the GUI/Debug overlays
-                if signal.mask != filter {
+                // if signal.mask != filter {
                     frame.signals.push(signal.clone());
-                }
+                // }
 
                 // B. Fetch visual data from ECS for the GPU
                 if let Ok(mut query) = self

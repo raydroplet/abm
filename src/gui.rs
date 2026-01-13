@@ -130,7 +130,7 @@ impl Presenter {
     }
 
     fn resolve_signal_color(sig: &Signal, alpha: u8) -> egui::Color32 {
-        match sig.mask.trailing_zeros() {
+        match sig.mask.trailing_ones() {
             0 => egui::Color32::from_rgba_unmultiplied(255, 50, 50, alpha), // Bit 0: Red (Sound)
             1 => egui::Color32::from_rgba_unmultiplied(50, 255, 50, alpha), // Bit 1: Green (Smell)
             2 => egui::Color32::from_rgba_unmultiplied(50, 100, 255, alpha), // Bit 2: Blue (Radio)
@@ -139,12 +139,12 @@ impl Presenter {
             5 => egui::Color32::from_rgba_unmultiplied(0, 255, 255, alpha), // Bit 5: Cyan (Electric)
             6 => egui::Color32::from_rgba_unmultiplied(255, 140, 0, alpha), // Bit 6: Orange (Heat)
             7 => egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha), // Bit 7: White (Debug)
-            _ => egui::Color32::from_gray(alpha), // Should effectively never happen
+            _ => panic!(),
         }
     }
 
-    fn render_debug_window(&self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        egui::Window::new("📊 Signal Engine Monitor")
+    fn render_debug_window(&self, ctx: &egui::Context) {
+        egui::Window::new("Monitor")
             .resizable(false)
             .collapsible(true)
             .default_pos([10.0, 10.0])
@@ -199,6 +199,11 @@ impl Presenter {
 
                 ui.separator();
 
+                let mut age = 0;
+                ui.add(egui::Slider::new(&mut age, 0..=120).text("age"));
+
+                ui.separator();
+
                 let wave_count = self.latest_debug_info.agent_count;
 
                 // 2. Spatial Entity Stats
@@ -219,25 +224,60 @@ impl Presenter {
                 }
             });
     }
+
+    fn render_agents(&self, painter: &egui::Painter, frame: &FrameData) {
+        // --- LAYER 2: AGENTS ---
+        for agent in &frame.agents {
+            painter.circle_filled(
+                egui::pos2(agent.position.x, agent.position.y),
+                agent.radius,
+                egui::Color32::from_rgba_unmultiplied(
+                    agent.color[0],
+                    agent.color[1],
+                    agent.color[2],
+                    agent.color[3],
+                ),
+            );
+        }
+    }
+
+    fn render_waves(&self, painter: &egui::Painter, frame: &FrameData) {
+        for sig in &frame.signals {
+            let alpha = (sig.intensity * 255.0) as u8;
+            let color = Self::resolve_signal_color(sig, alpha);
+
+            if sig.inner_radius > 0.5 {
+                let thickness = sig.outer_radius - sig.inner_radius;
+                let center_radius = sig.inner_radius + (thickness / 2.0);
+                painter.circle_stroke(
+                    egui::pos2(sig.origin.x, sig.origin.y),
+                    center_radius,
+                    egui::Stroke::new(thickness, color),
+                );
+            } else {
+                painter.circle_filled(
+                    egui::pos2(sig.origin.x, sig.origin.y),
+                    sig.outer_radius,
+                    color,
+                );
+            }
+        }
+    }
 }
 
 impl eframe::App for Presenter {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // ---------------------------------------------------------------------
-        // 1. DATA SYNC (Zero-Clone Buffer Swapping)
-        // ---------------------------------------------------------------------
-
-        // Drain the channel to get the newest frame
+        // drain the channel to get the newest frame
         let mut newest_arrived = None;
         while let Ok(frame) = self.receiver.try_recv() {
-            // If we already pulled a frame this loop but another is waiting,
+            // if we already pulled a frame this loop but another is waiting,
             // send the intermediate one back immediately so the engine doesn't starve.
             if let Some(old) = newest_arrived.replace(frame) {
                 let _ = self.returner.send(old);
             }
         }
 
-        // If a new frame arrived, swap it into our 'current_frame' storage
+        // if a new frame arrived, swap it into our 'current_frame' storage
         if let Some(new_frame) = newest_arrived {
             // replace() returns the old Some(FrameData). We send it back to the engine.
             if let Some(old_buffer) = self.current_frame.replace(new_frame) {
@@ -245,14 +285,12 @@ impl eframe::App for Presenter {
             }
         }
 
-        // Update debug info from whichever frame is currently active
+        // update debug info from whichever frame is currently active
         if let Some(frame) = &self.current_frame {
             self.latest_debug_info = frame.debug_info;
         }
 
-        // ---------------------------------------------------------------------
-        // 2. PHYSICS RATE CALCULATION (UPS) - Keep as is
-        // ---------------------------------------------------------------------
+        // ups
         let time = ctx.input(|i| i.time);
         if time - self.last_measure_time >= 0.5 {
             let current_total = self.latest_debug_info.tick_counter;
@@ -263,9 +301,7 @@ impl eframe::App for Presenter {
             self.last_measure_time = time;
         }
 
-        // ---------------------------------------------------------------------
-        // 3. RENDER LOOP
-        // ---------------------------------------------------------------------
+        // render loop
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(egui::Color32::from_rgb(10, 10, 15)))
             .show(ctx, |ui| {
@@ -273,48 +309,11 @@ impl eframe::App for Presenter {
 
                 // We only render if we actually have a frame buffer
                 if let Some(frame) = &self.current_frame {
-                    // --- LAYER 1: WAVES ---
-                    for sig in &frame.signals {
-                        let alpha = (sig.intensity * 255.0) as u8;
-                        let color = Self::resolve_signal_color(sig, alpha);
-
-                        if sig.inner_radius > 0.5 {
-                            let thickness = sig.outer_radius - sig.inner_radius;
-                            let center_radius = sig.inner_radius + (thickness / 2.0);
-                            painter.circle_stroke(
-                                egui::pos2(sig.origin.x, sig.origin.y),
-                                center_radius,
-                                egui::Stroke::new(thickness, color),
-                            );
-                        } else {
-                            painter.circle_filled(
-                                egui::pos2(sig.origin.x, sig.origin.y),
-                                sig.outer_radius,
-                                color,
-                            );
-                        }
-                    }
-
-                    // --- LAYER 2: AGENTS ---
-                    if let Some(frame) = &self.current_frame {
-                        for agent in &frame.agents {
-                            painter.circle_filled(
-                                egui::pos2(agent.position.x, agent.position.y),
-                                agent.radius,
-                                egui::Color32::from_rgba_unmultiplied(
-                                    agent.color[0],
-                                    agent.color[1],
-                                    agent.color[2],
-                                    agent.color[3],
-                                ),
-                            );
-                        }
-                    }
+                    self.render_waves(painter, frame);
+                    self.render_agents(painter, frame);
                 }
 
-                // --- LAYER 3: DEBUG UI ---
-                self.render_debug_window(ui, ctx);
-
+                self.render_debug_window(ctx);
                 ctx.request_repaint();
             });
     }
