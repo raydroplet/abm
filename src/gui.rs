@@ -1,7 +1,8 @@
 // gui.rs
 
+use crate::components::{SignalEmitter, Transform};
 use crate::engine::{AgentPoint, DebugInfo, Engine, FrameData};
-use crate::wave::Signal;
+use crate::wave::{LevelMask, Signal};
 
 pub use crossbeam_channel as crossbeam;
 pub use eframe::egui;
@@ -143,11 +144,13 @@ impl Presenter {
         }
     }
 
-    fn render_debug_window(&self, ctx: &egui::Context) {
+    fn render_debug_window(&mut self, ctx: &egui::Context) {
+        let padding = 5.0;
         egui::Window::new("Monitor")
             .resizable(false)
             .collapsible(true)
-            .default_pos([10.0, 10.0])
+            .default_pos([padding, padding])
+            .default_width(0.0)
             .show(ctx, |ui| {
                 // 1. Performance Metrics
                 let fps = 1.0 / ctx.input(|i| i.stable_dt);
@@ -199,30 +202,201 @@ impl Presenter {
 
                 ui.separator();
 
-                let mut age = 0;
-                ui.add(egui::Slider::new(&mut age, 0..=120).text("age"));
-
-                ui.separator();
-
                 let wave_count = self.latest_debug_info.agent_count;
 
-                // 2. Spatial Entity Stats
                 ui.label(format!(
                     "Total Entities: {}",
                     self.latest_debug_info.agent_count
                 ));
                 ui.label(format!("Visible Waves:  {}", wave_count));
 
-                // This confirms your SignalField culling is working
                 ui.label(format!(
                     "Ticks Elapsed:  {}",
                     self.latest_debug_info.tick_counter
                 ));
-
-                if ui.button("Reset Simulation").clicked() {
-                    // You could emit an event here to the engine
-                }
             });
+    }
+
+    fn render_inspection_window(&mut self, ctx: &egui::Context) {
+        let padding = 5.0;
+        egui::Window::new("Inspector")
+            .default_width(0.0)
+            .pivot(egui::Align2::RIGHT_TOP)
+            .default_pos(egui::pos2(
+                ctx.viewport_rect().max.x - padding,
+                ctx.viewport_rect().min.y + padding,
+            ))
+            .show(ctx, |ui| {
+                let mut transform = Transform::default();
+                let mut emitter = SignalEmitter::default();
+
+                Self::render_component_transform(ui, &mut transform);
+                Self::render_component_emitter(ui, &mut emitter);
+            });
+    }
+
+    fn render_component_transform(ui: &mut egui::Ui, transform: &mut Transform) {
+        egui::CollapsingHeader::new("Transform")
+            .default_open(true)
+            .show(ui, |ui| {
+                egui::Grid::new("transform_grid")
+                    .num_columns(2)
+                    .spacing([20.0, 4.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        // Position
+                        ui.label("Position");
+                        ui.horizontal(|ui| {
+                            ui.label("X");
+                            ui.add(egui::DragValue::new(&mut transform.position.x).speed(1.0));
+                            ui.label("Y");
+                            ui.add(egui::DragValue::new(&mut transform.position.y).speed(1.0));
+                        });
+                        ui.end_row();
+
+                        // Scale
+                        ui.label("Scale");
+                        ui.horizontal(|ui| {
+                            ui.label("X");
+                            ui.add(egui::DragValue::new(&mut transform.scale).speed(1.0));
+                            ui.label("Y");
+                            ui.add(egui::DragValue::new(&mut transform.scale).speed(1.0));
+                        });
+                        ui.end_row();
+                    });
+            });
+    }
+
+    fn render_component_emitter(ui: &mut egui::Ui, emitter: &mut SignalEmitter) {
+        egui::CollapsingHeader::new("Signal")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    egui::Grid::new("emitter_grid")
+                        .num_columns(2)
+                        .spacing([20.0, 1.0])
+                        .show(ui, |ui| {
+                            ui.label("Radius");
+                            ui.add(
+                                egui::Slider::new(&mut emitter.radius, 0.0..=500.0)
+                                    .drag_value_speed(0.1)
+                                    .step_by(0.1),
+                            );
+                            ui.end_row();
+
+                            ui.label("Aperture");
+                            let mut degrees = emitter.cone_angle.to_degrees();
+                            if ui
+                                .add(egui::Slider::new(&mut degrees, 0.0..=360.0).suffix("°"))
+                                .changed()
+                            {
+                                emitter.cone_angle = degrees.to_radians();
+                            }
+                            ui.end_row();
+
+                            ui.label("Rotation");
+                            let mut rot_deg = emitter.rotation.to_degrees();
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut rot_deg, 0.0..=360.0)
+                                        .drag_value_speed(1.0)
+                                        .suffix("°"),
+                                )
+                                .changed()
+                            {
+                                emitter.rotation = rot_deg.to_radians();
+                            }
+                            ui.end_row();
+                        });
+                });
+
+                ui.separator();
+
+                let mut mask = LevelMask::<1>::ZERO;
+                egui::CollapsingHeader::new("Masks")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        egui::Grid::new("masks_grid")
+                            .num_columns(2)
+                            .spacing([20.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label("Levels"); // Column 1
+                                if ui.button("Toggle All").clicked() { /* ... */ }
+                                ui.end_row();
+
+                                ui.allocate_space(egui::vec2(0.0, 0.0));
+                                Self::bitgrid_widget(ui, &mut mask);
+                                ui.end_row();
+
+                                ui.label("Signals"); // Column 1
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("Toggle All").clicked() { /* ... */ }
+                                });
+                                ui.end_row();
+
+                                ui.allocate_space(egui::vec2(0.0, 0.0));
+                                Self::bitgrid_widget(ui, &mut mask);
+                                ui.end_row();
+                            });
+                    });
+            });
+    }
+
+    fn bitgrid_widget(ui: &mut egui::Ui, mask: &mut LevelMask) {
+        let block_size = 16.0;
+        let gap = 2.0;
+        let grid_dim = 8;
+        // rows logic: removed the overwrite "rows = 8"
+        // assuming you want the toggle logic to actually work:
+        let expand_id = ui.make_persistent_id("level_matrix_expanded");
+        let expanded = ui.data(|d| d.get_temp::<bool>(expand_id).unwrap_or(true)); // Default true for visibility?
+        let rows = if expanded { 8 } else { 1 };
+
+        // We use a vertical layout so rows stack downward
+        ui.vertical(|ui| {
+            // Set spacing once for this scope
+            ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+
+            for y in 0..rows {
+                ui.horizontal(|ui| {
+                    for x in 0..grid_dim {
+                        let bit_index = y * grid_dim + x;
+                        let (rect, response) = ui.allocate_exact_size(
+                            egui::vec2(block_size, block_size),
+                            egui::Sense::click(),
+                        );
+
+                        if response.clicked() {
+                            let current = mask[bit_index];
+                            mask.set(bit_index, !current);
+                        }
+
+                        // Painting logic...
+                        if ui.is_rect_visible(rect) {
+                            let is_active = mask[bit_index];
+                            let color = if is_active {
+                                egui::Color32::LIGHT_BLUE
+                            } else {
+                                egui::Color32::from_gray(30)
+                            };
+
+                            // Use lighter rounding for a cleaner grid look
+                            ui.painter().rect_filled(rect, 2.0, color);
+
+                            if response.hovered() {
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    2.0,
+                                    egui::Stroke::new(1.0, egui::Color32::WHITE),
+                                    egui::StrokeKind::Middle,
+                                );
+                            }
+                        }
+                        response.on_hover_text(format!("Level {}", bit_index));
+                    }
+                });
+            }
+        });
     }
 
     fn render_agents(&self, painter: &egui::Painter, frame: &FrameData) {
@@ -314,6 +488,7 @@ impl eframe::App for Presenter {
                 }
 
                 self.render_debug_window(ctx);
+                self.render_inspection_window(ctx);
                 ctx.request_repaint();
             });
     }
