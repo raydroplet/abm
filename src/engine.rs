@@ -2,6 +2,7 @@
 
 use crate::components::*;
 use crate::wave::{LevelMask, Signal, SignalField, SignalMask};
+use hecs::Entity;
 
 use glam::Vec2;
 use hecs::World;
@@ -29,10 +30,37 @@ pub struct DebugInfo {
     pub active_levels_mask: LevelMask,
 }
 
+#[derive(Copy, Clone)]
+pub enum InspectionState {
+    UpdateTransform(Entity, Transform),
+    UpdateSignal(Entity, SignalEmitter),
+    Idle,
+}
+
+#[derive(Debug)]
+pub struct InspectionData {
+    pub entity: hecs::Entity,
+    pub xform: Transform,
+    pub signals: Vec<SignalEmitter>,
+}
+
 pub struct FrameData {
+    // render
     pub agents: Vec<AgentPoint>, // The "Points" for the GPU
     pub signals: Vec<Signal>,    // Keep these for UI/Overlay logic
+    // gui
     pub debug_info: DebugInfo,
+    //
+    //////
+    //
+    // 1. THE VIEW (Read-Only for GUI, Write-Only for Engine)
+    // The Engine guarantees this is always populated with the latest reality.
+    // The GUI just reads this to draw the window.
+    pub inspection_view: InspectionData,
+    // 2. THE COMMAND (Write-Only for GUI, Read-Only for Engine)
+    // The GUI only touches this if the user CHANGED something.
+    // The Engine checks this to see if it needs to update the ECS.
+    pub inspection_command: InspectionState,
 }
 
 //////////////////
@@ -50,6 +78,7 @@ pub struct Engine {
     camera_dimension: Vec2,
     camera_position: Vec2,
     //
+    selected_entity: Entity,
 }
 
 impl Engine {
@@ -60,7 +89,7 @@ impl Engine {
         let height = 768.0;
 
         Self::spawn_dummy_entities(width, height, &mut world, &mut signal_field);
-        Self::spawn_dummy_player(&mut world, &mut signal_field);
+        let id = Self::spawn_dummy_player(&mut world, &mut signal_field);
 
         Self {
             world,
@@ -71,6 +100,7 @@ impl Engine {
             signal_field, // Store the layer
             camera_dimension: Vec2::new(width, height),
             camera_position: Vec2::new(0.0, 0.0),
+            selected_entity: id,
         }
     }
 
@@ -190,6 +220,22 @@ impl Engine {
         //
         frame.debug_info.tick_time_ms = self.last_tick_time_ms;
         frame.debug_info.active_levels_mask = self.signal_field.get_level_mask();
+        //
+        if self.selected_entity != Entity::DANGLING {
+            let view = &mut frame.inspection_view;
+            view.entity = self.selected_entity;
+            view.signals.clear();
+
+            if let Ok(mut query) = self
+                .world
+                .query_one::<(&Transform, &SignalEmitter)>(self.selected_entity)
+            {
+                if let Some((transform, emitter)) = query.get() {
+                    view.xform = *transform;
+                    view.signals.push(*emitter);
+                }
+            }
+        }
     }
 
     ///////////////////
@@ -241,7 +287,7 @@ impl Engine {
         }
     }
 
-    fn spawn_dummy_player(world: &mut World, signal_field: &mut SignalField) {
+    fn spawn_dummy_player(world: &mut World, signal_field: &mut SignalField) -> hecs::Entity {
         let hero_pos = Vec2::new(512.0, 384.0);
         let scale = 15.0;
         let hero_id = world.spawn((
@@ -267,5 +313,34 @@ impl Engine {
         world
             .insert_one(hero_id, SignalEmitter::new(sig_key))
             .unwrap();
+
+        hero_id
+    }
+
+    pub fn handle(&mut self, command: InspectionState) {
+        type State = InspectionState;
+        match command {
+            State::UpdateTransform(entity, transform) => {
+                if let Ok(mut query) = self
+                    .world
+                    .query_one::<(&mut Transform, &SignalEmitter)>(entity)
+                {
+                    if let Some((xform, emitter)) = query.get() {
+                        // Update Component
+                        *xform = transform;
+                        // Update Signal
+                        self.signal_field.reposition(
+                            emitter.key,
+                            xform.position,
+                            xform.scale, // Keep the radius constant (or pulse it here!)
+                        );
+                    }
+                }
+            }
+            State::UpdateSignal(Entity, Signal) => {
+                //
+            }
+            InspectionState::Idle => {}
+        }
     }
 }

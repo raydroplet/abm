@@ -1,11 +1,12 @@
 // gui.rs
 
 use crate::components::{SignalEmitter, Transform};
-use crate::engine::{AgentPoint, DebugInfo, Engine, FrameData};
+use crate::engine::{DebugInfo, Engine, FrameData, InspectionData, InspectionState};
 use crate::wave::{LevelMask, Signal};
 
 pub use crossbeam_channel as crossbeam;
 pub use eframe::egui;
+use hecs::Entity;
 use std::thread;
 
 pub struct Producer {
@@ -33,7 +34,11 @@ impl Producer {
                 match self.receiver.try_recv() {
                     Ok(mut frame) => {
                         // A buffer is available! We can render.
+                        engine.handle(frame.inspection_command);
                         engine.render(&mut frame);
+
+                        // resets the command
+                        frame.inspection_command = InspectionState::Idle;
 
                         // Send it to the UI
                         if self.returner.send(frame).is_err() {
@@ -64,9 +69,6 @@ pub struct Presenter {
     receiver: crossbeam::Receiver<FrameData>,
     returner: crossbeam::Sender<FrameData>,
     //
-    latest_debug_info: DebugInfo,
-    latest_agents: Vec<AgentPoint>,
-    //
     // UPS (Physics) Smoothing
     last_tick_count: u64,   // Snapshot of total ticks 0.5s ago
     last_measure_time: f64, // Timestamp of the last check
@@ -86,9 +88,6 @@ impl Presenter {
             receiver: frame_receiver,
             returner: frame_returner,
             //
-            latest_debug_info: DebugInfo::default(),
-            latest_agents: Vec::new(),
-            //
             last_tick_count: 0,
             last_measure_time: 0.0,
             display_ups: 0,
@@ -104,6 +103,12 @@ impl Presenter {
 
         for _ in 0..2 {
             let _ = self.returner.send(FrameData {
+                inspection_command: InspectionState::Idle,
+                inspection_view: InspectionData {
+                    entity: Entity::DANGLING,
+                    xform: Transform::default(),
+                    signals: Vec::new(),
+                },
                 agents: Vec::new(),
                 signals: Vec::new(),
                 debug_info: DebugInfo::default(),
@@ -144,7 +149,7 @@ impl Presenter {
         }
     }
 
-    fn render_debug_window(&mut self, ctx: &egui::Context) {
+    fn render_debug_window(ctx: &egui::Context, frame: &FrameData, display_ups: u64) {
         let padding = 5.0;
         egui::Window::new("Monitor")
             .resizable(false)
@@ -159,20 +164,22 @@ impl Presenter {
                     ui.colored_label(egui::Color32::LIGHT_BLUE, format!("{:.0}", fps));
                 });
 
+                let debug_info = &frame.debug_info;
+
                 ui.horizontal(|ui| {
-                    let engine_fps = 1000.0 / self.latest_debug_info.render_time_ms;
+                    let engine_fps = 1000.0 / debug_info.render_time_ms;
                     ui.label("Potential FPS:");
                     ui.colored_label(egui::Color32::LIGHT_BLUE, format!("{:.0}", engine_fps));
                 });
 
                 ui.horizontal(|ui| {
                     ui.label("Simulation UPS:");
-                    ui.colored_label(egui::Color32::LIGHT_GREEN, format!("{}", self.display_ups));
+                    ui.colored_label(egui::Color32::LIGHT_GREEN, format!("{}", display_ups));
                 });
 
                 // ui.separator();
 
-                let engine_ms = self.latest_debug_info.render_time_ms;
+                let engine_ms = debug_info.render_time_ms;
                 ui.horizontal(|ui| {
                     ui.label("Engine Render Time:");
                     ui.colored_label(
@@ -186,7 +193,7 @@ impl Presenter {
                 });
 
                 ui.horizontal(|ui| {
-                    let phys_ms = self.latest_debug_info.tick_time_ms;
+                    let phys_ms = debug_info.tick_time_ms;
                     ui.label("Physics Time:");
                     ui.colored_label(
                         // If physics takes > 8ms, we are dangerously close to
@@ -202,22 +209,20 @@ impl Presenter {
 
                 ui.separator();
 
-                let wave_count = self.latest_debug_info.agent_count;
+                let wave_count = debug_info.agent_count;
 
-                ui.label(format!(
-                    "Total Entities: {}",
-                    self.latest_debug_info.agent_count
-                ));
+                ui.label(format!("Total Entities: {}", debug_info.agent_count));
                 ui.label(format!("Visible Waves:  {}", wave_count));
 
-                ui.label(format!(
-                    "Ticks Elapsed:  {}",
-                    self.latest_debug_info.tick_counter
-                ));
+                ui.label(format!("Ticks Elapsed:  {}", debug_info.tick_counter));
             });
     }
 
-    fn render_inspection_window(&mut self, ctx: &egui::Context) {
+    fn render_inspection_window(
+        ctx: &egui::Context,
+        view: &mut InspectionData,
+        mut command: &mut InspectionState,
+    ) {
         let padding = 5.0;
         egui::Window::new("Inspector")
             .default_width(0.0)
@@ -227,15 +232,27 @@ impl Presenter {
                 ctx.viewport_rect().min.y + padding,
             ))
             .show(ctx, |ui| {
-                let mut transform = Transform::default();
-                let mut emitter = SignalEmitter::default();
+                if view.entity == Entity::DANGLING {
+                    ui.label(egui::RichText::new("Entity: None").monospace());
+                    return;
+                }
 
-                Self::render_component_transform(ui, &mut transform);
-                Self::render_component_emitter(ui, &mut emitter);
+                ui.label(egui::RichText::new(format!("Entity #{:?}", view.entity)).monospace());
+                ui.separator();
+
+                Self::render_component_transform(ui, view, &mut command);
+                for e in &mut view.signals {
+                    Self::render_component_emitter(ui, e, &mut command);
+                }
             });
     }
 
-    fn render_component_transform(ui: &mut egui::Ui, transform: &mut Transform) {
+    fn render_component_transform(
+        ui: &mut egui::Ui,
+        view: &mut InspectionData,
+        command: &mut InspectionState,
+    ) {
+        let transform = &mut view.xform;
         egui::CollapsingHeader::new("Transform")
             .default_open(true)
             .show(ui, |ui| {
@@ -248,9 +265,18 @@ impl Presenter {
                         ui.label("Position");
                         ui.horizontal(|ui| {
                             ui.label("X");
-                            ui.add(egui::DragValue::new(&mut transform.position.x).speed(1.0));
+                            let response =
+                                ui.add(egui::DragValue::new(&mut transform.position.x).speed(1.0));
+                            if response.changed() {
+                                *command =
+                                    InspectionState::UpdateTransform(view.entity, *transform);
+                            }
                             ui.label("Y");
-                            ui.add(egui::DragValue::new(&mut transform.position.y).speed(1.0));
+                            let response = ui.add(egui::DragValue::new(&mut transform.position.y).speed(1.0));
+                            if response.changed() {
+                                *command =
+                                    InspectionState::UpdateTransform(view.entity, *transform);
+                            }
                         });
                         ui.end_row();
 
@@ -258,16 +284,28 @@ impl Presenter {
                         ui.label("Scale");
                         ui.horizontal(|ui| {
                             ui.label("X");
-                            ui.add(egui::DragValue::new(&mut transform.scale).speed(1.0));
+                            let response = ui.add(egui::DragValue::new(&mut transform.scale).speed(1.0));
+                            if response.changed() {
+                                *command =
+                                    InspectionState::UpdateTransform(view.entity, *transform);
+                            }
                             ui.label("Y");
-                            ui.add(egui::DragValue::new(&mut transform.scale).speed(1.0));
+                            let response = ui.add(egui::DragValue::new(&mut transform.scale).speed(1.0));
+                            if response.changed() {
+                                *command =
+                                    InspectionState::UpdateTransform(view.entity, *transform);
+                            }
                         });
                         ui.end_row();
                     });
             });
     }
 
-    fn render_component_emitter(ui: &mut egui::Ui, emitter: &mut SignalEmitter) {
+    fn render_component_emitter(
+        ui: &mut egui::Ui,
+        emitter: &mut SignalEmitter,
+        command: &mut InspectionState,
+    ) {
         egui::CollapsingHeader::new("Signal")
             .default_open(true)
             .show(ui, |ui| {
@@ -276,13 +314,13 @@ impl Presenter {
                         .num_columns(2)
                         .spacing([20.0, 1.0])
                         .show(ui, |ui| {
-                            ui.label("Radius");
-                            ui.add(
-                                egui::Slider::new(&mut emitter.radius, 0.0..=500.0)
-                                    .drag_value_speed(0.1)
-                                    .step_by(0.1),
-                            );
-                            ui.end_row();
+                            // ui.label("Radius");
+                            // ui.add(
+                            //     egui::Slider::new(&mut emitter.radius, 0.0..=500.0)
+                            //         .drag_value_speed(0.1)
+                            //         .step_by(0.1),
+                            // );
+                            // ui.end_row();
 
                             ui.label("Aperture");
                             let mut degrees = emitter.cone_angle.to_degrees();
@@ -312,7 +350,7 @@ impl Presenter {
 
                 ui.separator();
 
-                let mut mask = LevelMask::<1>::ZERO;
+                let mut mask = LevelMask::ZERO;
                 egui::CollapsingHeader::new("Masks")
                     .default_open(false)
                     .show(ui, |ui| {
@@ -399,8 +437,7 @@ impl Presenter {
         });
     }
 
-    fn render_agents(&self, painter: &egui::Painter, frame: &FrameData) {
-        // --- LAYER 2: AGENTS ---
+    fn render_agents(painter: &egui::Painter, frame: &FrameData) {
         for agent in &frame.agents {
             painter.circle_filled(
                 egui::pos2(agent.position.x, agent.position.y),
@@ -415,7 +452,7 @@ impl Presenter {
         }
     }
 
-    fn render_waves(&self, painter: &egui::Painter, frame: &FrameData) {
+    fn render_waves(painter: &egui::Painter, frame: &FrameData) {
         for sig in &frame.signals {
             let alpha = (sig.intensity * 255.0) as u8;
             let color = Self::resolve_signal_color(sig, alpha);
@@ -441,55 +478,66 @@ impl Presenter {
 
 impl eframe::App for Presenter {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // drain the channel to get the newest frame
+        // 1. Drain the channel to get the newest frame from the engine
         let mut newest_arrived = None;
         while let Ok(frame) = self.receiver.try_recv() {
-            // if we already pulled a frame this loop but another is waiting,
-            // send the intermediate one back immediately so the engine doesn't starve.
-            if let Some(old) = newest_arrived.replace(frame) {
-                let _ = self.returner.send(old);
+            // If we pulled a frame earlier in this loop (newest_arrived is Some),
+            // but found an even newer one, the previous one is "skipped".
+            // Since skipped frames were never "current" and never modified by GUI,
+            // we send them back immediately so the engine doesn't starve.
+            if let Some(skipped) = newest_arrived.replace(frame) {
+                let _ = self.returner.send(skipped);
             }
         }
 
-        // if a new frame arrived, swap it into our 'current_frame' storage
+        // 2. Prepare a variable to hold the old frame (if we swap)
+        let mut buffer_to_return = None;
+
+        // 3. If a new frame arrived, swap it into storage
         if let Some(new_frame) = newest_arrived {
-            // replace() returns the old Some(FrameData). We send it back to the engine.
-            if let Some(old_buffer) = self.current_frame.replace(new_frame) {
-                let _ = self.returner.send(old_buffer);
+            // We store the old buffer in a local variable instead of sending it immediately.
+            // This satisfies the requirement to hold it until the function ends,
+            // though usually, the "old" frame is safe to send here.
+            buffer_to_return = self.current_frame.replace(new_frame);
+        }
+
+        // 4. Update Logic & Rendering
+        if let Some(frame) = &mut self.current_frame {
+            // UPS Calculation
+            let time = ctx.input(|i| i.time);
+            if time - self.last_measure_time >= 0.5 {
+                let current_total = frame.debug_info.tick_counter;
+                let ticks_passed = current_total.wrapping_sub(self.last_tick_count);
+                let time_passed = (time - self.last_measure_time) as f64;
+                self.display_ups = (ticks_passed as f64 / time_passed) as u64;
+                self.last_tick_count = current_total;
+                self.last_measure_time = time;
             }
+
+            // Render loop (Modifies frame.inspection_view)
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(egui::Color32::from_rgb(10, 10, 15)))
+                .show(ctx, |ui| {
+                    let painter = ui.painter();
+                    Self::render_waves(painter, frame);
+                    Self::render_agents(painter, frame);
+                    Self::render_debug_window(ctx, frame, self.display_ups);
+
+                    // This is where the frame data is modified
+                    Self::render_inspection_window(
+                        ctx,
+                        &mut frame.inspection_view,
+                        &mut frame.inspection_command,
+                    );
+                });
+
+            ctx.request_repaint();
         }
 
-        // update debug info from whichever frame is currently active
-        if let Some(frame) = &self.current_frame {
-            self.latest_debug_info = frame.debug_info;
+        // 5. Finally, send the old buffer back to the engine
+        // We do this at the very end, ensuring all GUI work for this tick is complete.
+        if let Some(old_buffer) = buffer_to_return {
+            let _ = self.returner.send(old_buffer);
         }
-
-        // ups
-        let time = ctx.input(|i| i.time);
-        if time - self.last_measure_time >= 0.5 {
-            let current_total = self.latest_debug_info.tick_counter;
-            let ticks_passed = current_total.wrapping_sub(self.last_tick_count);
-            let time_passed = (time - self.last_measure_time) as f64;
-            self.display_ups = (ticks_passed as f64 / time_passed) as u64;
-            self.last_tick_count = current_total;
-            self.last_measure_time = time;
-        }
-
-        // render loop
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(egui::Color32::from_rgb(10, 10, 15)))
-            .show(ctx, |ui| {
-                let painter = ui.painter();
-
-                // We only render if we actually have a frame buffer
-                if let Some(frame) = &self.current_frame {
-                    self.render_waves(painter, frame);
-                    self.render_agents(painter, frame);
-                }
-
-                self.render_debug_window(ctx);
-                self.render_inspection_window(ctx);
-                ctx.request_repaint();
-            });
     }
 }

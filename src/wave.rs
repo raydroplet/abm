@@ -1,7 +1,7 @@
 // wave.rs
 
 use bitvec::prelude::*;
-use glam::{/* DVec2, */ Vec2};
+use glam::{Vec2};
 use hecs::Entity;
 use rustc_hash::FxHashMap;
 use slotmap::{SlotMap, new_key_type};
@@ -12,13 +12,16 @@ use smallvec::SmallVec;
 // ==================================================================================
 
 const LEVEL_COUNT: usize = 64;
-pub type LevelCount<const N: usize = 1> = [u32; LEVEL_COUNT];
-pub type ShadowMask<const N: usize = 1> = BitArray<[u64; N]>;
-pub type SignalMask<const N: usize = 1> = BitArray<[u64; N]>;
-pub type OcclusionMask<const N: usize = 1> = BitArray<[u64; N]>;
-pub type LevelMask<const N: usize = 1> = BitArray<[u64; N]>;
-pub type Bucket<const N: usize = 1> = SmallVec<[(SignalKey, SignalMask); 4]>; // The Bucket: A list of (ID, Mask) tuples
-pub type SpatialGrid<const N: usize = 1> = FxHashMap<TileKey, Bucket>; // The Grid: Map of Coordinates -> Bucket
+const N: usize = 1;
+pub type LevelCount = [u32; LEVEL_COUNT];
+//
+type CommonBitArray = BitArray<[u64; N]>;
+pub type ShadowMask = CommonBitArray;
+pub type SignalMask = CommonBitArray;
+pub type LevelMask = CommonBitArray;
+//
+pub type Bucket = SmallVec<[(SignalKey, SignalMask); 4]>; // The Bucket: A list of (ID, Mask) tuples
+pub type SpatialGrid= FxHashMap<TileKey, Bucket>; // The Grid: Map of Coordinates -> Bucket
 
 new_key_type! { pub struct SignalKey; }
 
@@ -35,10 +38,10 @@ pub struct TileKey {
 // CONST GENERIC SIGNAL
 // N = Number of BYTES (u8).
 // Signal<10> = 10 bytes = 80 bits.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Signal<const N: usize = 1> {
     // source
-    pub origin: Vec2,
+    pub origin: Vec2, // !!!
     pub direction: Vec2,
     // shape
     pub outer_radius: f32,

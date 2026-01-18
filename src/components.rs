@@ -3,7 +3,7 @@
 use crate::wave::{SignalKey, SignalMask, LevelMask};
 use glam::Vec2;
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy, Debug)]
 pub struct Transform {
     pub position: Vec2,
     // pub rotation: Vec2,
@@ -32,7 +32,7 @@ pub struct Model {
     pub b: u8,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy, Debug)]
 pub struct SignalEmitter {
     // shape
     pub radius: f32,
