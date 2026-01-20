@@ -1,6 +1,6 @@
 // components.rs
 
-use crate::wave::{SignalKey, SignalMask, LevelMask};
+use crate::wave::{SignalKey, SignalMask, LevelMask, SignalField, Signal};
 use glam::Vec2;
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -30,6 +30,7 @@ pub struct Model {
     pub r: u8,
     pub g: u8,
     pub b: u8,
+    pub a: u8,
 }
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -45,15 +46,35 @@ pub struct SignalEmitter {
 }
 
 impl SignalEmitter {
-    pub fn new(key: SignalKey) -> Self {
+    pub fn emit(field: &mut SignalField, origin: Vec2, direction_radians: f32, outer_radius: f32, inner_radius: f32, cone_angle_radians: f32, signal_mask: SignalMask, layer_mask: SignalMask, entity: hecs::Entity) -> Self {
+        let direction_unit = Vec2::new(direction_radians.cos(), direction_radians.sin());
+        let signal = Signal {
+            origin: origin,
+            direction: direction_unit,
+            outer_radius: outer_radius,
+            inner_radius: inner_radius,
+            angle_cos: (cone_angle_radians * 0.5).cos(),
+            // intensity: ,
+            // falloff: ,
+            mask: signal_mask,
+            entity: entity,
+        };
+
+        let key = field.emit(signal);
+
         Self {
             key: key,
-            radius: 10.0,
-            cone_angle: std::f32::consts::PI * 2.0, // Default to 360 (Omni)
-            rotation: 0.0,
-            signal_mask: SignalMask::ZERO,
-            layer_mask: LevelMask::ZERO,
+            radius: outer_radius,
+            cone_angle: cone_angle_radians, // Default to 360 (Omni)
+            rotation: direction_radians,
+            signal_mask: signal_mask,
+            layer_mask: layer_mask,
+        
         }
+    }
+
+    pub fn cease(field: &mut SignalField, key: SignalKey) {
+        field.cease(key);
     }
 }
 

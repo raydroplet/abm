@@ -13,9 +13,8 @@ const FIXED_DT: f32 = 1.0 / 100.0; // Run physics exactly 100 times a second
 const BIT_BOUNDING_VOLUME: usize = 0;
 
 #[derive(Clone, Copy, Debug)]
-pub struct AgentPoint {
-    pub position: Vec2,
-    pub radius: f32,
+pub struct AgentRenderData {
+    pub signal: Signal,
     pub color: [u8; 4],
     // Add extra fields here if your shaders need them (e.g., velocity for motion blur)
 }
@@ -41,13 +40,13 @@ pub enum InspectionState {
 pub struct InspectionData {
     pub entity: hecs::Entity,
     pub xform: Transform,
-    pub signals: Vec<SignalEmitter>,
+    pub emitters: Vec<SignalEmitter>,
 }
 
 pub struct FrameData {
     // render
-    pub agents: Vec<AgentPoint>, // The "Points" for the GPU
-    pub signals: Vec<Signal>,    // Keep these for UI/Overlay logic
+    pub agents: Vec<AgentRenderData>, // The "Points" for the GPU
+    // pub signals: Vec<Signal>,    // Keep these for UI/Overlay logic
     // gui
     pub debug_info: DebugInfo,
     //
@@ -175,7 +174,7 @@ impl Engine {
 
         // 1. Prepare for new frame
         frame.agents.clear();
-        frame.signals.clear();
+        // frame.signals.clear();
 
         let mut signal_mask = SignalMask::default();
         signal_mask.set(BIT_BOUNDING_VOLUME, true);
@@ -197,16 +196,15 @@ impl Engine {
             |signal| {
                 // A. Store signal for the GUI/Debug overlays
                 // if signal.mask != filter {
-                frame.signals.push(signal.clone());
+                // frame.signals.push(signal.clone());
                 // }
 
                 // B. Fetch visual data from ECS for the GPU
-                if let Ok(mut query) = self.world.query_one::<(&Transform, &Model)>(signal.entity) {
-                    if let Some((xform, model)) = query.get() {
-                        frame.agents.push(AgentPoint {
-                            position: xform.position,
-                            radius: xform.scale,
-                            color: [model.r, model.g, model.b, 255],
+                if let Ok(mut query) = self.world.query_one::<&Model>(signal.entity) {
+                    if let Some(model) = query.get() {
+                        frame.agents.push(AgentRenderData {
+                            signal: signal.clone(),
+                            color: [model.r, model.g, model.b, model.a],
                         });
                     }
                 }
@@ -221,10 +219,11 @@ impl Engine {
         frame.debug_info.tick_time_ms = self.last_tick_time_ms;
         frame.debug_info.active_levels_mask = self.signal_field.get_level_mask();
         //
+        // for the inspection window
         if self.selected_entity != Entity::DANGLING {
             let view = &mut frame.inspection_view;
             view.entity = self.selected_entity;
-            view.signals.clear();
+            view.emitters.clear();
 
             if let Ok(mut query) = self
                 .world
@@ -232,7 +231,7 @@ impl Engine {
             {
                 if let Some((transform, emitter)) = query.get() {
                     view.xform = *transform;
-                    view.signals.push(*emitter);
+                    view.emitters.push(*emitter);
                 }
             }
         }
@@ -247,72 +246,107 @@ impl Engine {
         signal_field: &mut SignalField,
     ) {
         let mut rng = rand::rng();
+
         for _ in 0..3000 {
-            // ... (Your existing random generation code) ...
+            // Random Data
             let rand_pos_x = rng.random_range(0.0..width);
             let rand_pos_y = rng.random_range(0.0..height);
             let rand_vel_x = rng.random_range(-100.0..100.0);
             let rand_vel_y = rng.random_range(-100.0..100.0);
-            let r_val = rng.random_range(0..=255);
-            let g_val = rng.random_range(0..=255);
-            let b_val = rng.random_range(0..=255);
+            // let r_val = rng.random_range(0..=255);
+            // let g_val = rng.random_range(0..=255);
+            // let b_val = rng.random_range(0..=255);
+            let color = rng.random_range(200..=255);
 
-            // A. Spawn the Entity first
-            let id = world.spawn((
-                Transform {
-                    position: Vec2::new(rand_pos_x, rand_pos_y),
-                    // rotation: Vec2::default(),
-                    scale: 3.0,
-                },
-                Velocity {
-                    linear: Vec2::new(rand_vel_x, rand_vel_y),
-                    // angular: 0.0,
-                },
-                Model {
-                    r: r_val,
-                    g: g_val,
-                    b: b_val,
-                },
-            ));
-
-            let mut mask = SignalMask::default();
-            mask.set(BIT_BOUNDING_VOLUME, true);
-
-            let origin = Vec2::new(rand_pos_x, rand_pos_y);
+            let pos = Vec2::new(rand_pos_x, rand_pos_y);
             let radius = 10.0;
-            let sig_key = signal_field.emit(Signal::new_sphere(origin, radius, mask, id));
+            let scale = 3.0;
 
-            // C. Link the SignalKey to the Entity so they stay in sync during movement
-            world.insert_one(id, SignalEmitter::new(sig_key)).unwrap();
+            // 1. RESERVE ID (Critical for correct linking)
+            let id = world.reserve_entity();
+
+            // 2. Prepare Masks
+            let mut signal_mask = SignalMask::default();
+            signal_mask.set(BIT_BOUNDING_VOLUME, true);
+            let layer_mask = SignalMask::default();
+
+            // 3. Create Emitter (Sphere Factory)
+            let emitter = SignalEmitter::emit(
+                signal_field,
+                pos,
+                0.0,                   // Rotation (irrelevant for sphere)
+                radius,                // Outer Radius
+                0.0,
+                std::f32::consts::TAU, // Cone Angle: 2*PI (Full Sphere)
+                signal_mask,
+                layer_mask,
+                id,
+            );
+
+            // 4. ATOMIC SPAWN
+            // Everything enters the world at the exact same moment
+            world.spawn_at(
+                id,
+                (
+                    Transform {
+                        position: pos,
+                        scale: scale,
+                        ..Transform::default()
+                    },
+                    Velocity {
+                        linear: Vec2::new(rand_vel_x, rand_vel_y),
+                        ..Velocity::default()
+                    },
+                    Model {
+                        r: color,
+                        g: color,
+                        b: color,
+                        a: 0,
+                    },
+                    emitter, // <--- Attached immediately
+                ),
+            );
         }
     }
 
     fn spawn_dummy_player(world: &mut World, signal_field: &mut SignalField) -> hecs::Entity {
         let hero_pos = Vec2::new(512.0, 384.0);
         let scale = 15.0;
-        let hero_id = world.spawn((
-            Transform {
-                position: Vec2::new(hero_pos[0], hero_pos[1]),
-                scale: scale,
-                ..Transform::default()
-            },
-            Velocity {
-                linear: Vec2::new(200.0, 200.0),
-                ..Velocity::default()
-            },
-            Model { r: 255, g: 0, b: 0 },
-            // We leave SignalEmitter out for a split second
-        ));
-
-        let mut mask = SignalMask::default();
-        mask.set(BIT_BOUNDING_VOLUME, true); //
-        // mask.set(BIT_PASSIVE, true); //
         //
-        let sig_key = signal_field.emit(Signal::new_sphere(hero_pos, scale, mask, hero_id));
-
-        world
-            .insert_one(hero_id, SignalEmitter::new(sig_key))
-            .unwrap();
+        let hero_id = world.reserve_entity();
+        //
+        let mut signal_mask = SignalMask::default();
+        let layer_mask = SignalMask::default();
+        signal_mask.set(BIT_BOUNDING_VOLUME, true);
+        //
+        let emitter = SignalEmitter::emit(
+            signal_field,
+            hero_pos,
+            0.0,
+            scale,
+            0.0,
+            2.094, // 120 degrees
+            signal_mask,
+            layer_mask,
+            hero_id,
+        );
+        //
+        world.spawn_at(
+            hero_id,
+            (
+                Transform {
+                    position: hero_pos,
+                    scale: scale,
+                    ..Transform::default()
+                },
+                Velocity {
+                    linear: Vec2::new(200.0, 200.0),
+                    ..Velocity::default()
+                },
+                Model { r: 200, g: 200, b: 200, a: 200 },
+                emitter,
+            ),
+        );
 
         hero_id
     }
@@ -337,8 +371,20 @@ impl Engine {
                     }
                 }
             }
-            State::UpdateSignal(Entity, Signal) => {
-                //
+            State::UpdateSignal(entity, signal) => {
+                if let Ok(mut query) = self.world.query_one::<&mut SignalEmitter>(entity) {
+                    if let Some(emitter) = query.get() {
+                        // Update Signal
+                        *emitter = signal;
+
+                        self.signal_field.reshape(
+                            emitter.key,
+                            emitter.rotation,
+                            emitter.cone_angle,
+                        );
+                        println!("angle {}", emitter.cone_angle);
+                    }
+                }
             }
             InspectionState::Idle => {}
         }

@@ -6,6 +6,7 @@ use crate::wave::{LevelMask, Signal};
 
 pub use crossbeam_channel as crossbeam;
 pub use eframe::egui;
+use egui::{Color32, Painter, Pos2, Shape, Stroke, pos2};
 use hecs::Entity;
 use std::thread;
 
@@ -107,10 +108,10 @@ impl Presenter {
                 inspection_view: InspectionData {
                     entity: Entity::DANGLING,
                     xform: Transform::default(),
-                    signals: Vec::new(),
+                    emitters: Vec::new(),
                 },
                 agents: Vec::new(),
-                signals: Vec::new(),
+                // signals: Vec::new(),
                 debug_info: DebugInfo::default(),
             });
         }
@@ -241,9 +242,7 @@ impl Presenter {
                 ui.separator();
 
                 Self::render_component_transform(ui, view, &mut command);
-                for e in &mut view.signals {
-                    Self::render_component_emitter(ui, e, &mut command);
-                }
+                Self::render_component_emitter(ui, view, &mut command);
             });
     }
 
@@ -272,7 +271,8 @@ impl Presenter {
                                     InspectionState::UpdateTransform(view.entity, *transform);
                             }
                             ui.label("Y");
-                            let response = ui.add(egui::DragValue::new(&mut transform.position.y).speed(1.0));
+                            let response =
+                                ui.add(egui::DragValue::new(&mut transform.position.y).speed(1.0));
                             if response.changed() {
                                 *command =
                                     InspectionState::UpdateTransform(view.entity, *transform);
@@ -284,13 +284,15 @@ impl Presenter {
                         ui.label("Scale");
                         ui.horizontal(|ui| {
                             ui.label("X");
-                            let response = ui.add(egui::DragValue::new(&mut transform.scale).speed(1.0));
+                            let response =
+                                ui.add(egui::DragValue::new(&mut transform.scale).speed(1.0));
                             if response.changed() {
                                 *command =
                                     InspectionState::UpdateTransform(view.entity, *transform);
                             }
                             ui.label("Y");
-                            let response = ui.add(egui::DragValue::new(&mut transform.scale).speed(1.0));
+                            let response =
+                                ui.add(egui::DragValue::new(&mut transform.scale).speed(1.0));
                             if response.changed() {
                                 *command =
                                     InspectionState::UpdateTransform(view.entity, *transform);
@@ -303,81 +305,85 @@ impl Presenter {
 
     fn render_component_emitter(
         ui: &mut egui::Ui,
-        emitter: &mut SignalEmitter,
+        view: &mut InspectionData,
         command: &mut InspectionState,
     ) {
-        egui::CollapsingHeader::new("Signal")
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    egui::Grid::new("emitter_grid")
-                        .num_columns(2)
-                        .spacing([20.0, 1.0])
-                        .show(ui, |ui| {
-                            // ui.label("Radius");
-                            // ui.add(
-                            //     egui::Slider::new(&mut emitter.radius, 0.0..=500.0)
-                            //         .drag_value_speed(0.1)
-                            //         .step_by(0.1),
-                            // );
-                            // ui.end_row();
-
-                            ui.label("Aperture");
-                            let mut degrees = emitter.cone_angle.to_degrees();
-                            if ui
-                                .add(egui::Slider::new(&mut degrees, 0.0..=360.0).suffix("°"))
-                                .changed()
-                            {
-                                emitter.cone_angle = degrees.to_radians();
-                            }
-                            ui.end_row();
-
-                            ui.label("Rotation");
-                            let mut rot_deg = emitter.rotation.to_degrees();
-                            if ui
-                                .add(
-                                    egui::Slider::new(&mut rot_deg, 0.0..=360.0)
-                                        .drag_value_speed(1.0)
-                                        .suffix("°"),
-                                )
-                                .changed()
-                            {
-                                emitter.rotation = rot_deg.to_radians();
-                            }
-                            ui.end_row();
-                        });
-                });
-
-                ui.separator();
-
-                let mut mask = LevelMask::ZERO;
-                egui::CollapsingHeader::new("Masks")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        egui::Grid::new("masks_grid")
+        for emitter in &mut view.emitters {
+            egui::CollapsingHeader::new("Signal")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        egui::Grid::new("emitter_grid")
                             .num_columns(2)
-                            .spacing([20.0, 4.0])
+                            .spacing([20.0, 1.0])
                             .show(ui, |ui| {
-                                ui.label("Levels"); // Column 1
-                                if ui.button("Toggle All").clicked() { /* ... */ }
+                                // ui.label("Radius");
+                                // ui.add(
+                                //     egui::Slider::new(&mut emitter.radius, 0.0..=500.0)
+                                //         .drag_value_speed(0.1)
+                                //         .step_by(0.1),
+                                // );
+                                // ui.end_row();
+
+                                ui.label("Aperture");
+                                let mut degrees = emitter.cone_angle.to_degrees();
+                                if ui
+                                    .add(egui::Slider::new(&mut degrees, 0.0..=360.0).suffix("°"))
+                                    .changed()
+                                {
+                                    emitter.cone_angle = degrees.to_radians();
+                                    *command = InspectionState::UpdateSignal(view.entity, *emitter);
+                                }
                                 ui.end_row();
 
-                                ui.allocate_space(egui::vec2(0.0, 0.0));
-                                Self::bitgrid_widget(ui, &mut mask);
-                                ui.end_row();
-
-                                ui.label("Signals"); // Column 1
-                                ui.horizontal(|ui| {
-                                    if ui.small_button("Toggle All").clicked() { /* ... */ }
-                                });
-                                ui.end_row();
-
-                                ui.allocate_space(egui::vec2(0.0, 0.0));
-                                Self::bitgrid_widget(ui, &mut mask);
+                                ui.label("Rotation");
+                                let mut rot_deg = emitter.rotation.to_degrees();
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut rot_deg, 0.0..=360.0)
+                                            .drag_value_speed(1.0)
+                                            .suffix("°"),
+                                    )
+                                    .changed()
+                                {
+                                    emitter.rotation = rot_deg.to_radians();
+                                    *command = InspectionState::UpdateSignal(view.entity, *emitter);
+                                }
                                 ui.end_row();
                             });
                     });
-            });
+
+                    ui.separator();
+
+                    let mut mask = LevelMask::ZERO;
+                    egui::CollapsingHeader::new("Masks")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            egui::Grid::new("masks_grid")
+                                .num_columns(2)
+                                .spacing([20.0, 4.0])
+                                .show(ui, |ui| {
+                                    ui.label("Levels"); // Column 1
+                                    if ui.button("Toggle All").clicked() { /* ... */ }
+                                    ui.end_row();
+
+                                    ui.allocate_space(egui::vec2(0.0, 0.0));
+                                    Self::bitgrid_widget(ui, &mut mask);
+                                    ui.end_row();
+
+                                    ui.label("Signals"); // Column 1
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("Toggle All").clicked() { /* ... */ }
+                                    });
+                                    ui.end_row();
+
+                                    ui.allocate_space(egui::vec2(0.0, 0.0));
+                                    Self::bitgrid_widget(ui, &mut mask);
+                                    ui.end_row();
+                                });
+                        });
+                });
+        }
     }
 
     fn bitgrid_widget(ui: &mut egui::Ui, mask: &mut LevelMask) {
@@ -438,40 +444,76 @@ impl Presenter {
     }
 
     fn render_agents(painter: &egui::Painter, frame: &FrameData) {
-        for agent in &frame.agents {
-            painter.circle_filled(
-                egui::pos2(agent.position.x, agent.position.y),
-                agent.radius,
-                egui::Color32::from_rgba_unmultiplied(
-                    agent.color[0],
-                    agent.color[1],
-                    agent.color[2],
-                    agent.color[3],
-                ),
+        // Pre-calculate shape properties to avoid re-instantiating constant styles
+        let stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+
+        for data in &frame.agents {
+            let color = egui::Color32::from_rgba_unmultiplied(
+                data.color[0],
+                data.color[1],
+                data.color[2],
+                data.color[3],
             );
-        }
-    }
+            let signal = &data.signal;
+            let origin = egui::pos2(signal.origin.x, signal.origin.y);
 
-    fn render_waves(painter: &egui::Painter, frame: &FrameData) {
-        for sig in &frame.signals {
-            let alpha = (sig.intensity * 255.0) as u8;
-            let color = Self::resolve_signal_color(sig, alpha);
+            // C. Calculate the Half-Angle ($\theta$)
+            // Clamp prevents NaN panics if float is slightly off -1.0/1.0
+            let half_angle = signal.angle_cos.clamp(-1.0, 1.0).acos();
 
-            if sig.inner_radius > 0.5 {
-                let thickness = sig.outer_radius - sig.inner_radius;
-                let center_radius = sig.inner_radius + (thickness / 2.0);
-                painter.circle_stroke(
-                    egui::pos2(sig.origin.x, sig.origin.y),
-                    center_radius,
-                    egui::Stroke::new(thickness, color),
-                );
-            } else {
-                painter.circle_filled(
-                    egui::pos2(sig.origin.x, sig.origin.y),
-                    sig.outer_radius,
-                    color,
-                );
+            // OPTIMIZATION: Full Circle Check
+            // If the angle is close to PI (180 deg half-angle = 360 total),
+            // draw a hardware-optimized circle instead of a polygon.
+            if half_angle > std::f32::consts::PI - 0.01 {
+                // OPTIMIZATION: Simple Full Circle
+                if half_angle > std::f32::consts::PI - 0.01 && signal.inner_radius < 0.1 {
+                    // OLD: painter.circle_filled(origin, outer_r, color);
+
+                    // NEW: Use 'circle', which takes both fill AND stroke
+                    painter.circle(origin, signal.outer_radius, color, stroke);
+                    continue;
+                }
+                continue;
             }
+
+            // B. Calculate Rotation
+            // atan2(y, x) is standard, but ensure your coordinate system
+            // matches egui (Y is Down). If Y is Up in your simulation, use -y.
+            let base_angle = signal.direction.y.atan2(signal.direction.x);
+
+            // D. Generate Points for the Sector (Pie Slice)
+            // We use a small, fixed-size array logic or a reusable buffer if possible.
+            // For clarity here, we optimize the loop.
+
+            let steps = 32;
+            // Optimization: Use standard math for steps to avoid "cracks"
+            let start_angle = base_angle - half_angle;
+            let angle_step = (half_angle * 2.0) / (steps as f32);
+
+            let mut points: Vec<egui::Pos2> = Vec::with_capacity(steps + 2);
+
+            // 1. Center Point
+            points.push(origin);
+
+            // 2. Arc Points
+            for i in 0..=steps {
+                let theta = start_angle + (i as f32 * angle_step);
+                // Use sincos for slight CPU instruction optimization on some archs
+                let (sin, cos) = theta.sin_cos();
+                points.push(egui::pos2(
+                    origin.x + signal.outer_radius * cos,
+                    origin.y + signal.outer_radius * sin,
+                ));
+            }
+
+            // 3. Draw
+            // egui automatically handles the triangulation of convex shapes.
+            painter.add(egui::Shape::Path(egui::epaint::PathShape {
+                points,
+                closed: true,
+                fill: color,
+                stroke: stroke.into(),
+            }));
         }
     }
 }
@@ -519,7 +561,7 @@ impl eframe::App for Presenter {
                 .frame(egui::Frame::new().fill(egui::Color32::from_rgb(10, 10, 15)))
                 .show(ctx, |ui| {
                     let painter = ui.painter();
-                    Self::render_waves(painter, frame);
+                    // Self::render_waves(painter, frame);
                     Self::render_agents(painter, frame);
                     Self::render_debug_window(ctx, frame, self.display_ups);
 

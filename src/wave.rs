@@ -1,7 +1,7 @@
 // wave.rs
 
 use bitvec::prelude::*;
-use glam::{Vec2};
+use glam::Vec2;
 use hecs::Entity;
 use rustc_hash::FxHashMap;
 use slotmap::{SlotMap, new_key_type};
@@ -21,7 +21,7 @@ pub type SignalMask = CommonBitArray;
 pub type LevelMask = CommonBitArray;
 //
 pub type Bucket = SmallVec<[(SignalKey, SignalMask); 4]>; // The Bucket: A list of (ID, Mask) tuples
-pub type SpatialGrid= FxHashMap<TileKey, Bucket>; // The Grid: Map of Coordinates -> Bucket
+pub type SpatialGrid = FxHashMap<TileKey, Bucket>; // The Grid: Map of Coordinates -> Bucket
 
 new_key_type! { pub struct SignalKey; }
 
@@ -48,8 +48,8 @@ pub struct Signal<const N: usize = 1> {
     pub inner_radius: f32,
     pub angle_cos: f32,
     // force
-    pub intensity: f32, // How strong?
-    pub falloff: f32,   // How fast it fades?
+    // pub intensity: f32, // How strong?
+    // pub falloff: f32,   // How fast it fades?
     // data
     pub entity: Entity,
     pub mask: SignalMask, // SignalType bit mask
@@ -59,12 +59,12 @@ impl Signal {
     pub fn new_sphere(origin: Vec2, radius: f32, mask: SignalMask, entity: Entity) -> Self {
         Self {
             origin,
-            direction: Vec2::X, // Arbitrary valid vector
+            direction: Vec2::X,
             outer_radius: radius,
             inner_radius: 0.0,
-            angle_cos: -1.0, // Optimization: Skips angle math
-            intensity: 1.0,
-            falloff: 0.1,
+            angle_cos: -1.0,
+            // intensity: 1.0,
+            // falloff: 0.1,
             mask: mask,
             entity: entity,
         }
@@ -159,7 +159,7 @@ impl SignalField {
         store.remove(key);
     }
 
-    /// MOVE: Keeps Key, Updates Position
+    /// updates Position and radius
     pub fn reposition(&mut self, key: SignalKey, new_pos: Vec2, new_radius: f32) {
         // 1. SPLIT SELF
         let Self {
@@ -218,6 +218,26 @@ impl SignalField {
         // 5. Add to NEW grid
         // internal_add calculates the key based on the *current* signal state, which we just updated.
         Self::internal_add(grid, active_levels, level_counts, key, signal);
+    }
+
+    /// Updates the facing direction and field-of-view of a signal.
+    /// This is O(1) as it does not require updating the spatial grid.
+    pub fn reshape(&mut self, key: SignalKey, new_direction_radians: f32, new_angle_radians: f32) {
+        if let Some(signal) = self.store.get_mut(key) {
+            // 1. Update Direction
+            // We convert the angle back into a normalized Vec2
+            let (sin, cos) = new_direction_radians.sin_cos();
+            signal.direction = Vec2::new(cos, sin);
+
+            // 2. Update Aperture (Cone Angle)
+            // We assume 'aperture' is the Full Angle (e.g., 90 degrees).
+            // The dot product check requires the cosine of the Half Angle.
+            //
+            // Example:
+            // - Aperture 360 deg (2 PI) -> Half PI -> cos(-1.0) -> Omni
+            // - Aperture 90 deg (PI/2)  -> Half PI/4 -> cos(0.707)
+            signal.angle_cos = (new_angle_radians * 0.5).cos();
+        }
     }
 
     //////////
@@ -592,30 +612,35 @@ impl SignalField {
     //         && dist_sq >= (sig.inner_radius * sig.inner_radius)
     // }
 
+    // BUG: untested
     fn check_intersection_point(&self, target_pos: Vec2, sig: &Signal) -> bool {
-        // 1. Vector Calculation
         let to_target = target_pos - sig.origin;
+
+        // 1. Calculate Squared Distance (Cheap: x*x + y*y)
         let dist_sq = to_target.length_squared();
 
-        // 2. Radius Check (Outer & Inner)
-        if dist_sq > sig.outer_radius * sig.outer_radius
-            || dist_sq < sig.inner_radius * sig.inner_radius
-        {
+        // 2. Early Radius Check (Cheap)
+        if dist_sq > sig.outer_radius * sig.outer_radius {
             return false;
         }
 
-        // 3. Angle Check (The optimization)
-        // If angle_cos is close to -1.0 (Omni), we skip the dot product entirely.
-        if sig.angle_cos > -1.0 {
-            // Am I a cone?
-            // Safe normalization handles the case where target == origin
-            let dir_to_target = to_target.normalize_or_zero();
+        // 3. Dot Product (Un-normalized)
+        let dot = sig.direction.dot(to_target);
 
-            // Dot Product: 1.0 = Facing, 0.0 = Side, -1.0 = Behind
-            if sig.direction.dot(dir_to_target) < sig.angle_cos {
-                // (How aligned are these two arrows) < (Is the alignment worse than my limit?)
-                return false;
-            }
+        // 4. "Behind" Check
+        // If dot is negative, the target is behind us.
+        // Unless you have >180 FOV, this is an instant fail.
+        if dot < 0.0 {
+            return false;
+        }
+
+        // 5. Check
+        // Instead of: dot / sqrt(dist_sq) > angle_cos
+        // We use:     dot * dot > angle_cos * angle_cos * dist_sq
+        let threshold_sq = sig.angle_cos * sig.angle_cos * dist_sq;
+
+        if dot * dot < threshold_sq {
+            return false;
         }
 
         true
