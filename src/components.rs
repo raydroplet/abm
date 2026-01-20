@@ -1,12 +1,12 @@
 // components.rs
 
-use crate::wave::{SignalKey, SignalMask, LevelMask, SignalField, Signal};
+use crate::wave::{LevelMask, Signal, SignalField, SignalKey, SignalMask};
 use glam::Vec2;
 
 #[derive(Default, Clone, Copy, Debug)]
 pub struct Transform {
     pub position: Vec2,
-    // pub rotation: Vec2,
+    pub rotation: Vec2,
     pub scale: f32, // should be Vec2, but not supported for now
 }
 
@@ -38,44 +38,51 @@ pub struct SignalEmitter {
     // shape
     pub radius: f32,
     pub cone_angle: f32, // 90 degrees = PI/2
-    pub rotation: f32, // 0.0 = Right, PI/2 = Up, PI = Left.
+    // pub rotation: f32, // 0.0 = Right, PI/2 = Up, PI = Left.
     // properties
     pub signal_mask: SignalMask,
     pub layer_mask: LevelMask,
-    pub key: SignalKey,
 }
 
-impl SignalEmitter {
-    pub fn emit(field: &mut SignalField, origin: Vec2, direction_radians: f32, outer_radius: f32, inner_radius: f32, cone_angle_radians: f32, signal_mask: SignalMask, layer_mask: SignalMask, entity: hecs::Entity) -> Self {
-        let direction_unit = Vec2::new(direction_radians.cos(), direction_radians.sin());
-        let signal = Signal {
-            origin: origin,
-            direction: direction_unit,
-            outer_radius: outer_radius,
-            inner_radius: inner_radius,
-            angle_cos: (cone_angle_radians * 0.5).cos(),
-            // intensity: ,
-            // falloff: ,
-            mask: signal_mask,
-            entity: entity,
-        };
+// impl SignalEmitter {
+// pub fn emit(field: &mut SignalField, origin: Vec2, /* direction_radians: f32, */ outer_radius: f32, inner_radius: f32, cone_angle_radians: f32, signal_mask: SignalMask, layer_mask: SignalMask, entity: hecs::Entity) -> Self {
+//     let direction_unit = Vec2::new(direction_radians.cos(), direction_radians.sin());
+//     let signal = Signal {
+//         origin: origin,
+//         direction: direction_unit,
+//         outer_radius: outer_radius,
+//         inner_radius: inner_radius,
+//         angle_cos: (cone_angle_radians * 0.5).cos(),
+//         // intensity: ,
+//         // falloff: ,
+//         mask: signal_mask,
+//         entity: entity,
+//     };
+//
+//     let key = field.emit(signal);
+//
+//     Self {
+//         key: key,
+//         radius: outer_radius,
+//         cone_angle: cone_angle_radians, // Default to 360 (Omni)
+//         // rotation: direction_radians,
+//         signal_mask: signal_mask,
+//         layer_mask: layer_mask,
+//
+//     }
+// }
 
-        let key = field.emit(signal);
+// Points to parent
+#[derive(Debug, Clone, Copy)]
+pub struct SpatialAnchor {
+    pub parent: hecs::Entity,
+    pub position_offset: Vec2,
+}
 
-        Self {
-            key: key,
-            radius: outer_radius,
-            cone_angle: cone_angle_radians, // Default to 360 (Omni)
-            rotation: direction_radians,
-            signal_mask: signal_mask,
-            layer_mask: layer_mask,
-        
-        }
-    }
-
-    pub fn cease(field: &mut SignalField, key: SignalKey) {
-        field.cease(key);
-    }
+// Points to parent
+#[derive(Debug, Clone, Copy)]
+pub struct LifecycleAnchor {
+    pub parent: hecs::Entity,
 }
 
 // pub struct DebugCamera {

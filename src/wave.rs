@@ -23,7 +23,10 @@ pub type LevelMask = CommonBitArray;
 pub type Bucket = SmallVec<[(SignalKey, SignalMask); 4]>; // The Bucket: A list of (ID, Mask) tuples
 pub type SpatialGrid = FxHashMap<TileKey, Bucket>; // The Grid: Map of Coordinates -> Bucket
 
-new_key_type! { pub struct SignalKey; }
+// new_key_type! { pub struct SignalKey; }
+// can be swapped for u64 latter and use entity.to_bits() to avoid coupling with hecs
+// it is used here for convenience and to remember what they key should actually be
+pub type SignalKey = hecs::Entity; // we will just use the generational hecs::Entity as the key
 
 // level: how big is the tile? are we looking at a 1km square or a 1m square?
 // x,y: grid positions for this tile
@@ -51,32 +54,33 @@ pub struct Signal<const N: usize = 1> {
     // pub intensity: f32, // How strong?
     // pub falloff: f32,   // How fast it fades?
     // data
-    pub entity: Entity,
+    // pub entity: Entity, // may not even be needed since systems deal with components
     pub mask: SignalMask, // SignalType bit mask
 }
-
-impl Signal {
-    pub fn new_sphere(origin: Vec2, radius: f32, mask: SignalMask, entity: Entity) -> Self {
-        Self {
-            origin,
-            direction: Vec2::X,
-            outer_radius: radius,
-            inner_radius: 0.0,
-            angle_cos: -1.0,
-            // intensity: 1.0,
-            // falloff: 0.1,
-            mask: mask,
-            entity: entity,
-        }
-    }
-}
+//
+// impl Signal {
+//     pub fn new_sphere(origin: Vec2, radius: f32, mask: SignalMask, entity: Entity) -> Self {
+//         Self {
+//             origin,
+//             direction: Vec2::X,
+//             outer_radius: radius,
+//             inner_radius: 0.0,
+//             angle_cos: -1.0,
+//             // intensity: 1.0,
+//             // falloff: 0.1,
+//             mask: mask,
+//             // entity: entity,
+//         }
+//     }
+// }
 
 // ==================================================================================
 // 2. THE SYSTEM
 // ==================================================================================
 
 pub struct SignalField {
-    pub store: SlotMap<SignalKey, Signal>,
+    // pub store: SlotMap<SignalKey, Signal>,
+    pub store: FxHashMap<SignalKey, Signal>,
 
     // Mask stored as bytes
     // stores signal identifiers (SignalKey) for a specific tile (TileKey)
@@ -106,7 +110,7 @@ impl SignalField {
     // =========================================================================
 
     /// CREATE: Generates a NEW Key
-    pub fn emit(&mut self, signal: Signal) -> SignalKey {
+    pub fn emit(&mut self, signal: Signal, entity: Entity) -> SignalKey {
         // 1. Destructure Self (Split Borrows)
         let Self {
             store,
@@ -117,7 +121,7 @@ impl SignalField {
         } = self;
 
         // 2. Insert into storage (Moves 'signal', so we can't use it afterwards)
-        let key = store.insert(signal);
+        let key = store.insert_at(signal);
 
         // 3. Read the signal BACK from the store to index it
         // We can do this because 'store' and 'grid' are now separate references.
@@ -160,7 +164,7 @@ impl SignalField {
     }
 
     /// updates Position and radius
-    pub fn reposition(&mut self, key: SignalKey, new_pos: Vec2, new_radius: f32) {
+    pub fn reposition(&mut self, key: SignalKey, new_pos: Vec2, inner_radius: f32, outer_radius: f32) {
         // 1. SPLIT SELF
         let Self {
             store,
@@ -184,14 +188,15 @@ impl SignalField {
 
         // Calculate the Spatial Hash for where it IS vs where it WANTS TO BE
         let old_tile = Self::get_coordinates(signal.outer_radius, signal.origin);
-        let new_tile = Self::get_coordinates(new_radius, new_pos);
+        let new_tile = Self::get_coordinates(outer_radius, new_pos);
 
         // If the agent moved, but didn't cross a grid boundary, we skip the HashMap thrashing.
         // The Grid points to the SignalKey, and the SignalKey is still valid.
         // We only update the raw data in 'store'.
         if old_tile == new_tile {
             signal.origin = new_pos;
-            signal.outer_radius = new_radius;
+            signal.outer_radius = outer_radius;
+            signal.inner_radius = inner_radius;
             return;
         }
 
@@ -213,7 +218,8 @@ impl SignalField {
 
         // 4. Update the Signal (In Place)
         signal.origin = new_pos;
-        signal.outer_radius = new_radius;
+        signal.outer_radius = outer_radius;
+        signal.inner_radius = inner_radius;
 
         // 5. Add to NEW grid
         // internal_add calculates the key based on the *current* signal state, which we just updated.

@@ -28,6 +28,12 @@
 ## Mitigations / Patterns
 > Strategies to manage relationships without a Scene Graph
 
+### Order of Execution
+- **Velocity**: Apply physics to all agents (Parents move here).
+- **Spatial Sync**: Snap Children to the new Parent positions.
+- **Signal Sync**: Update SignalField with the final positions of everyone.
+- **Lifecycle**: Cleanup dead entities.
+
 ### 1. The Attachment Pattern (Spatial Sync)
 * **Concept:** The "child" actively looks up and mimics the "parent's" position.
 * **Implementation:**
@@ -54,3 +60,5 @@
 * **Use Case:** Footsteps, Gunshots, Blood Splatters.
 * **Implementation:** Spawn with a `Lifetime` component. Do **not** store their ID on the creator.
 * **Why use it:** Prevents bloat. The player shouldn't track the 50 footsteps they left behind.
+
+

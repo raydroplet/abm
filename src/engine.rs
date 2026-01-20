@@ -7,7 +7,8 @@ use hecs::Entity;
 use glam::Vec2;
 use hecs::World;
 use rand::Rng;
-use std::time::Instant;
+use std::f32::consts::TAU;
+use std::time::Instant; // or f64::consts::TAU
 
 const FIXED_DT: f32 = 1.0 / 100.0; // Run physics exactly 100 times a second
 const BIT_BOUNDING_VOLUME: usize = 0;
@@ -108,65 +109,10 @@ impl Engine {
         let start_update = Instant::now();
         let delta_time = start_update.duration_since(self.last_update).as_secs_f32();
         self.last_update = start_update;
-        //
         self.time_accumulator += delta_time;
 
-        // SPIRAL OF DEATH PROTECTION:
-        // If the game lags hard (0.25s freeze), don't try to catch up
-        // by running 15 physics steps instantly. Just cap it.
-        //
-        // the logic inside the while loop is currently too fast for this to happen,
-        // but it will stay here in case of future needs
-        if self.time_accumulator > 0.25 {
-            self.time_accumulator = 0.25;
-        }
-
-        // fixed update loop
-        // We only update physics in chunks of FIXED_DT (e.g., 0.0166s)
-        while self.time_accumulator >= FIXED_DT {
-            let tick_time = Instant::now();
-
-            // 1. MOVEMENT LOOP (Updates Position)
-            for (_id, (xform, vel)) in self.world.query_mut::<(&mut Transform, &mut Velocity)>() {
-                xform.position.x += vel.linear.x * FIXED_DT;
-                xform.position.y += vel.linear.y * FIXED_DT;
-
-                // Collision Logic (Bounce off walls)
-                if xform.position.x >= self.camera_dimension.x {
-                    vel.linear.x *= -1.0;
-                    xform.position.x = self.camera_dimension.x;
-                }
-                if xform.position.x <= 0.0 {
-                    vel.linear.x *= -1.0;
-                    xform.position.x = 0.0;
-                }
-                if xform.position.y >= self.camera_dimension.y {
-                    vel.linear.y *= -1.0;
-                    xform.position.y = self.camera_dimension.y;
-                }
-                if xform.position.y <= 0.0 {
-                    vel.linear.y *= -1.0;
-                    xform.position.y = 0.0;
-                }
-            }
-
-            // 2. SIGNAL SYNC LOOP (Updates SignalLayer)
-            // We iterate over entities that have BOTH Position and Emitter
-            for (_id, (xform, emitter)) in self.world.query_mut::<(&Transform, &SignalEmitter)>() {
-                // Reposition the signal to match the agent
-                // We split the borrow here: 'pos' is from 'world', 'reposition' is on 'signal_layer'
-                self.signal_field.reposition(
-                    emitter.key,
-                    xform.position,
-                    xform.scale, // Keep the radius constant (or pulse it here!)
-                );
-            }
-
-            self.time_accumulator -= FIXED_DT;
-            self.tick_counter += 1;
-
-            self.last_tick_time_ms = tick_time.elapsed().as_secs_f32() * 1000.0;
-        }
+        Self::system_sync_spatial(&mut self.world);
+        self.system_simple_physics();
     }
 
     pub fn render(&self, frame: &mut FrameData) {
@@ -274,8 +220,8 @@ impl Engine {
             let emitter = SignalEmitter::emit(
                 signal_field,
                 pos,
-                0.0,                   // Rotation (irrelevant for sphere)
-                radius,                // Outer Radius
+                0.0,    // Rotation (irrelevant for sphere)
+                radius, // Outer Radius
                 0.0,
                 std::f32::consts::TAU, // Cone Angle: 2*PI (Full Sphere)
                 signal_mask,
@@ -309,11 +255,89 @@ impl Engine {
         }
     }
 
+    fn system_sync_spatial(world: &mut World) {
+        let mut buffer = Vec::new(); // not bothering with allocations for now
+
+        // Pass 1: Read & Calc
+        for (child_id, (anchor, _)) in world.query::<(&SpatialAnchor, &Transform)>().iter() {
+            if let Ok(parent) = world.get::<&Transform>(anchor.parent) {
+                buffer.push((child_id, parent.position + anchor.position_offset));
+            }
+        }
+
+        // Pass 2: Write
+        for (child_id, pos) in buffer.iter() {
+            if let Ok(mut child) = world.get::<&mut Transform>(*child_id) {
+                child.position = *pos;
+            }
+        }
+    }
+
+    fn system_simple_physics(&mut self) {
+        // SPIRAL OF DEATH PROTECTION:
+        // If the game lags hard (0.25s freeze), don't try to catch up
+        // by running 15 physics steps instantly. Just cap it.
+        //
+        // the logic inside the while loop is currently too fast for this to happen,
+        // but it will stay here in case of future needs
+        if self.time_accumulator > 0.25 {
+            println!("heavy processing. slowing time down!");
+            self.time_accumulator = 0.25;
+        }
+
+        // fixed update loop
+        // We only update physics in chunks of FIXED_DT (e.g., 0.0166s)
+        while self.time_accumulator >= FIXED_DT {
+            let tick_time = Instant::now();
+
+            // 1. MOVEMENT LOOP (Updates Position)
+            for (_id, (xform, vel)) in self.world.query_mut::<(&mut Transform, &mut Velocity)>() {
+                xform.position.x += vel.linear.x * FIXED_DT;
+                xform.position.y += vel.linear.y * FIXED_DT;
+
+                // Collision Logic (Bounce off walls)
+                if xform.position.x >= self.camera_dimension.x {
+                    vel.linear.x *= -1.0;
+                    xform.position.x = self.camera_dimension.x;
+                }
+                if xform.position.x <= 0.0 {
+                    vel.linear.x *= -1.0;
+                    xform.position.x = 0.0;
+                }
+                if xform.position.y >= self.camera_dimension.y {
+                    vel.linear.y *= -1.0;
+                    xform.position.y = self.camera_dimension.y;
+                }
+                if xform.position.y <= 0.0 {
+                    vel.linear.y *= -1.0;
+                    xform.position.y = 0.0;
+                }
+            }
+
+            // 2. SIGNAL SYNC LOOP (Updates SignalLayer)
+            // We iterate over entities that have BOTH Position and Emitter
+            for (_id, (xform, emitter)) in self.world.query_mut::<(&Transform, &SignalEmitter)>() {
+                // Reposition the signal to match the agent
+                // We split the borrow here: 'pos' is from 'world', 'reposition' is on 'signal_layer'
+                self.signal_field.reposition(
+                    emitter.key,
+                    xform.position,
+                    xform.scale, // Keep the radius constant (or pulse it here!)
+                );
+            }
+
+            self.time_accumulator -= FIXED_DT;
+            self.tick_counter += 1;
+
+            self.last_tick_time_ms = tick_time.elapsed().as_secs_f32() * 1000.0;
+        }
+    }
+
     fn spawn_dummy_player(world: &mut World, signal_field: &mut SignalField) -> hecs::Entity {
-        let hero_pos = Vec2::new(512.0, 384.0);
+        let player_pos = Vec2::new(512.0, 384.0);
         let scale = 15.0;
         //
-        let hero_id = world.reserve_entity();
+        let player_id = world.reserve_entity();
         //
         let mut signal_mask = SignalMask::default();
         let layer_mask = SignalMask::default();
@@ -321,21 +345,21 @@ impl Engine {
         //
         let emitter = SignalEmitter::emit(
             signal_field,
-            hero_pos,
+            player_pos,
             0.0,
             scale,
-            0.0,
+            scale - 1.0,
             2.094, // 120 degrees
             signal_mask,
             layer_mask,
-            hero_id,
+            player_id,
         );
         //
         world.spawn_at(
-            hero_id,
+            player_id,
             (
                 Transform {
-                    position: hero_pos,
+                    position: player_pos,
                     scale: scale,
                     ..Transform::default()
                 },
@@ -343,12 +367,54 @@ impl Engine {
                     linear: Vec2::new(200.0, 200.0),
                     ..Velocity::default()
                 },
-                Model { r: 200, g: 200, b: 200, a: 200 },
+                Model {
+                    r: 200,
+                    g: 200,
+                    b: 200,
+                    a: 200,
+                },
                 emitter,
             ),
         );
 
-        hero_id
+        // create yet another signal and sync it to our player
+        let scale = 100.0;
+        let another_id = world.reserve_entity();
+        let emitter = SignalEmitter::emit(
+            signal_field,
+            player_pos,
+            0.0,
+            scale,
+            0.0,
+            TAU, // 120 degrees
+            signal_mask,
+            layer_mask,
+            another_id,
+        );
+
+        world.spawn_at(
+            another_id,
+            (
+                Transform {
+                    position: player_pos,
+                    scale: scale,
+                    ..Transform::default()
+                },
+                SpatialAnchor {
+                    parent: player_id,
+                    position_offset: Vec2::new(0.0, 0.0),
+                },
+                Model {
+                    r: 200,
+                    g: 200,
+                    b: 200,
+                    a: 200,
+                },
+                emitter,
+            ),
+        );
+
+        player_id
     }
 
     pub fn handle(&mut self, command: InspectionState) {
@@ -377,12 +443,17 @@ impl Engine {
                         // Update Signal
                         *emitter = signal;
 
+                        println!(
+                            "angle {:.} vs TAU {:.}. equal? {}",
+                            emitter.cone_angle,
+                            TAU,
+                            emitter.cone_angle == TAU
+                        );
                         self.signal_field.reshape(
                             emitter.key,
                             emitter.rotation,
                             emitter.cone_angle,
                         );
-                        println!("angle {}", emitter.cone_angle);
                     }
                 }
             }

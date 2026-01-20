@@ -1,12 +1,11 @@
 // gui.rs
 
-use crate::components::{SignalEmitter, Transform};
+use crate::components::Transform;
 use crate::engine::{DebugInfo, Engine, FrameData, InspectionData, InspectionState};
 use crate::wave::{LevelMask, Signal};
 
 pub use crossbeam_channel as crossbeam;
 pub use eframe::egui;
-use egui::{Color32, Painter, Pos2, Shape, Stroke, pos2};
 use hecs::Entity;
 use std::thread;
 
@@ -444,8 +443,8 @@ impl Presenter {
     }
 
     fn render_agents(painter: &egui::Painter, frame: &FrameData) {
-        // Pre-calculate shape properties to avoid re-instantiating constant styles
-        let stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+        let stroke_color = egui::Color32::WHITE;
+        let stroke_width = 1.0;
 
         for data in &frame.agents {
             let color = egui::Color32::from_rgba_unmultiplied(
@@ -457,62 +456,124 @@ impl Presenter {
             let signal = &data.signal;
             let origin = egui::pos2(signal.origin.x, signal.origin.y);
 
-            // C. Calculate the Half-Angle ($\theta$)
-            // Clamp prevents NaN panics if float is slightly off -1.0/1.0
+            // C. Calculate the Half-Angle
             let half_angle = signal.angle_cos.clamp(-1.0, 1.0).acos();
 
-            // OPTIMIZATION: Full Circle Check
-            // If the angle is close to PI (180 deg half-angle = 360 total),
-            // draw a hardware-optimized circle instead of a polygon.
-            if half_angle > std::f32::consts::PI - 0.01 {
-                // OPTIMIZATION: Simple Full Circle
-                if half_angle > std::f32::consts::PI - 0.01 && signal.inner_radius < 0.1 {
-                    // OLD: painter.circle_filled(origin, outer_r, color);
-
-                    // NEW: Use 'circle', which takes both fill AND stroke
-                    painter.circle(origin, signal.outer_radius, color, stroke);
-                    continue;
-                }
+            // OPTIMIZATION: Full Circle
+            // If ~360 degrees and NOT hollow, use hardware circle
+            if half_angle > std::f32::consts::PI - 0.01 && signal.inner_radius < 0.1 {
+                painter.circle(
+                    origin,
+                    signal.outer_radius,
+                    color,
+                    egui::Stroke::new(stroke_width, stroke_color),
+                );
                 continue;
             }
 
-            // B. Calculate Rotation
-            // atan2(y, x) is standard, but ensure your coordinate system
-            // matches egui (Y is Down). If Y is Up in your simulation, use -y.
+            // D. Manual Mesh Generation (Works for all angles)
             let base_angle = signal.direction.y.atan2(signal.direction.x);
-
-            // D. Generate Points for the Sector (Pie Slice)
-            // We use a small, fixed-size array logic or a reusable buffer if possible.
-            // For clarity here, we optimize the loop.
-
             let steps = 32;
-            // Optimization: Use standard math for steps to avoid "cracks"
             let start_angle = base_angle - half_angle;
             let angle_step = (half_angle * 2.0) / (steps as f32);
 
-            let mut points: Vec<egui::Pos2> = Vec::with_capacity(steps + 2);
+            // 1. Prepare the Mesh (For Fill)
+            let mut mesh = egui::Mesh::default();
 
-            // 1. Center Point
-            points.push(origin);
+            // 2. Prepare the Outline Points (For Stroke)
+            // Capacity: (steps+1) for outer + (steps+1) for inner
+            let mut outline_points: Vec<egui::Pos2> = Vec::with_capacity((steps + 1) * 2);
 
-            // 2. Arc Points
+            // 3. Generate Vertices
             for i in 0..=steps {
                 let theta = start_angle + (i as f32 * angle_step);
-                // Use sincos for slight CPU instruction optimization on some archs
                 let (sin, cos) = theta.sin_cos();
-                points.push(egui::pos2(
+
+                // Outer Vertex
+                let outer_pos = egui::pos2(
                     origin.x + signal.outer_radius * cos,
                     origin.y + signal.outer_radius * sin,
-                ));
+                );
+
+                // Inner Vertex
+                let inner_pos = if signal.inner_radius > 0.0 {
+                    egui::pos2(
+                        origin.x + signal.inner_radius * cos,
+                        origin.y + signal.inner_radius * sin,
+                    )
+                } else {
+                    origin
+                };
+
+                // Add to Mesh (Triangle Strip Logic)
+                // We add two vertices (Outer, Inner) per step.
+                // egui::Mesh uses indexed triangles, but we can just add quads manually.
+                if i > 0 {
+                    let idx = mesh.vertices.len() as u32;
+                    // Previous Outer, Previous Inner
+                    // Current Outer, Current Inner
+                    // We need the indices of the PREVIOUS two points (idx-2, idx-1)
+                    // and the CURRENT two points (which we are about to add).
+
+                    // Actually, simpler approach: Just add colored vertices and let egui triangulate?
+                    // No, manual indices are safest.
+                }
+
+                // Let's use the simplest robust method:
+                // Add vertices, then add indices for a Quad connecting to the previous step.
+
+                mesh.vertices.push(egui::epaint::Vertex {
+                    pos: outer_pos,
+                    uv: egui::pos2(0.0, 0.0),
+                    color: color,
+                });
+                mesh.vertices.push(egui::epaint::Vertex {
+                    pos: inner_pos,
+                    uv: egui::pos2(0.0, 0.0),
+                    color: color,
+                });
+
+                if i > 0 {
+                    let base_idx = (mesh.vertices.len() as u32) - 4; // Start of previous pair
+                    // 0: Prev Outer, 1: Prev Inner, 2: Curr Outer, 3: Curr Inner
+                    // Triangle 1: PrevOuter, PrevInner, CurrInner
+                    mesh.add_triangle(base_idx, base_idx + 1, base_idx + 3);
+                    // Triangle 2: PrevOuter, CurrInner, CurrOuter
+                    mesh.add_triangle(base_idx, base_idx + 3, base_idx + 2);
+                }
+
+                // Add to Outline path
+                // We push outer points normally
+                outline_points.push(outer_pos);
             }
 
-            // 3. Draw
-            // egui automatically handles the triangulation of convex shapes.
+            // 4. Finish Outline Path
+            // Now push inner points in REVERSE to close the loop properly for the stroke
+            if signal.inner_radius > 0.0 {
+                // We need to regenerate or store them. Storing is easier but we didn't store inner list.
+                // Re-calculating loop in reverse is cheap.
+                for i in (0..=steps).rev() {
+                    let theta = start_angle + (i as f32 * angle_step);
+                    let (sin, cos) = theta.sin_cos();
+                    outline_points.push(egui::pos2(
+                        origin.x + signal.inner_radius * cos,
+                        origin.y + signal.inner_radius * sin,
+                    ));
+                }
+            } else {
+                outline_points.push(origin);
+            }
+
+            // 5. Draw
+            // A. Draw the solid fill (The Mesh)
+            painter.add(egui::Shape::Mesh(mesh.into()));
+
+            // B. Draw the outline (The Path)
             painter.add(egui::Shape::Path(egui::epaint::PathShape {
-                points,
+                points: outline_points,
                 closed: true,
-                fill: color,
-                stroke: stroke.into(),
+                fill: egui::Color32::TRANSPARENT, // Important! Don't fill the path, we did that with the mesh
+                stroke: egui::Stroke::new(stroke_width, stroke_color).into(),
             }));
         }
     }
