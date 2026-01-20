@@ -2,9 +2,8 @@
 
 use bitvec::prelude::*;
 use glam::Vec2;
-use hecs::Entity;
 use rustc_hash::FxHashMap;
-use slotmap::{SlotMap, new_key_type};
+// use slotmap::{SlotMap, new_key_type};
 use smallvec::SmallVec;
 
 // ==================================================================================
@@ -41,7 +40,7 @@ pub struct TileKey {
 // CONST GENERIC SIGNAL
 // N = Number of BYTES (u8).
 // Signal<10> = 10 bytes = 80 bits.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Signal<const N: usize = 1> {
     // source
     pub origin: Vec2, // !!!
@@ -98,7 +97,8 @@ pub struct SignalField {
 impl SignalField {
     pub fn new() -> Self {
         Self {
-            store: SlotMap::with_key(),
+            // store: SlotMap::with_key(),
+            store: FxHashMap::default(),
             grid: FxHashMap::default(),
             active_levels: LevelMask::default(),
             level_counts: [0; LEVEL_COUNT],
@@ -110,7 +110,7 @@ impl SignalField {
     // =========================================================================
 
     /// CREATE: Generates a NEW Key
-    pub fn emit(&mut self, signal: Signal, entity: Entity) -> SignalKey {
+    pub fn emit(&mut self, signal: Signal, key: SignalKey) {
         // 1. Destructure Self (Split Borrows)
         let Self {
             store,
@@ -120,17 +120,8 @@ impl SignalField {
             ..
         } = self;
 
-        // 2. Insert into storage (Moves 'signal', so we can't use it afterwards)
-        let key = store.insert_at(signal);
-
-        // 3. Read the signal BACK from the store to index it
-        // We can do this because 'store' and 'grid' are now separate references.
-        // We use the reference inside 'store' so we don't need to clone anything.
-        if let Some(stored_signal) = store.get(key) {
-            Self::internal_add(grid, active_levels, level_counts, key, stored_signal);
-        }
-
-        key
+        Self::internal_add(grid, active_levels, level_counts, key, &signal);
+        store.insert(key, signal);
     }
 
     /// DELETE: Removes existing Key
@@ -146,7 +137,7 @@ impl SignalField {
         } = self;
 
         // 2. Look up the signal to see where it was
-        if let Some(sig) = store.get(key) {
+        if let Some(sig) = store.get(&key) {
             // 3. Remove from Grid (Using specific fields, not the whole struct)
             // matching the signature of internal_remove(grid, key, radius, origin)
             Self::internal_remove(
@@ -160,11 +151,17 @@ impl SignalField {
         }
 
         // 4. Finally remove from storage
-        store.remove(key);
+        store.remove(&key);
     }
 
     /// updates Position and radius
-    pub fn reposition(&mut self, key: SignalKey, new_pos: Vec2, inner_radius: f32, outer_radius: f32) {
+    pub fn reposition(
+        &mut self,
+        key: SignalKey,
+        new_pos: Vec2,
+        inner_radius: f32,
+        outer_radius: f32,
+    ) {
         // 1. SPLIT SELF
         let Self {
             store,
@@ -175,7 +172,7 @@ impl SignalField {
         } = self;
 
         // 2. Get the signal (Mutable Borrow of STORE)
-        let signal = if let Some(sig) = store.get_mut(key) {
+        let signal = if let Some(sig) = store.get_mut(&key) {
             sig
         } else {
             return;
@@ -229,7 +226,7 @@ impl SignalField {
     /// Updates the facing direction and field-of-view of a signal.
     /// This is O(1) as it does not require updating the spatial grid.
     pub fn reshape(&mut self, key: SignalKey, new_direction_radians: f32, new_angle_radians: f32) {
-        if let Some(signal) = self.store.get_mut(key) {
+        if let Some(signal) = self.store.get_mut(&key) {
             // 1. Update Direction
             // We convert the angle back into a normalized Vec2
             let (sin, cos) = new_direction_radians.sin_cos();
@@ -274,7 +271,7 @@ impl SignalField {
             }) {
                 for (key, sig_mask) in bucket {
                     if (*sig_mask & signal_mask).any() {
-                        if let Some(sig) = self.store.get(*key) {
+                        if let Some(sig) = self.store.get(key) {
                             if self.check_intersection_point(pos, sig) {
                                 callback(sig);
                             }
@@ -291,7 +288,7 @@ impl SignalField {
         max: Vec2,
         query_mask: SignalMask,
         layer_mask: LevelMask,
-        mut callback: impl FnMut(&Signal),
+        mut callback: impl FnMut(&Signal, &hecs::Entity),
     ) {
         let scanning = self.active_levels & layer_mask;
 
@@ -320,11 +317,11 @@ impl SignalField {
                         for (key, sig_mask) in bucket {
                             // Quick Mask Filter
                             if (*sig_mask & query_mask).any() {
-                                if let Some(sig) = self.store.get(*key) {
+                                if let Some(sig) = self.store.get(key) {
                                     // 3. Precise Collision Check
                                     // We use AABB vs Circle here to be safe
                                     // if self.check_aabb_circle_collision(min, max, sig) {
-                                    callback(sig);
+                                    callback(sig, key);
                                     // }
                                 }
                             }
@@ -372,7 +369,7 @@ impl SignalField {
                     }) {
                         for (key, sig_mask) in bucket {
                             if (*sig_mask & query_mask).any() {
-                                if let Some(sig) = self.store.get(*key) {
+                                if let Some(sig) = self.store.get(key) {
                                     // 2. NARROW PHASE: Cone vs Circle Intersection
                                     if self.check_intersection_cone(
                                         origin,
@@ -494,7 +491,7 @@ impl SignalField {
                 // 3a. Bucket Collection
                 for (key, mask) in bucket {
                     if (*mask & (occluder_mask | target_mask)).any() {
-                        if let Some(sig) = self.store.get(*key) {
+                        if let Some(sig) = self.store.get(key) {
                             // 1. Calculate Real Distance
                             let dist = (sig.origin - origin).length();
 

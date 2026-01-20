@@ -111,8 +111,8 @@ impl Engine {
         self.last_update = start_update;
         self.time_accumulator += delta_time;
 
-        Self::system_sync_spatial(&mut self.world);
         self.system_simple_physics();
+        //
     }
 
     pub fn render(&self, frame: &mut FrameData) {
@@ -139,14 +139,14 @@ impl Engine {
             self.camera_dimension + self.camera_position,
             signal_mask,
             layer_mask,
-            |signal| {
+            |signal, entity| {
                 // A. Store signal for the GUI/Debug overlays
                 // if signal.mask != filter {
                 // frame.signals.push(signal.clone());
                 // }
 
                 // B. Fetch visual data from ECS for the GPU
-                if let Ok(mut query) = self.world.query_one::<&Model>(signal.entity) {
+                if let Ok(mut query) = self.world.query_one::<&Model>(*entity) {
                     if let Some(model) = query.get() {
                         frame.agents.push(AgentRenderData {
                             signal: signal.clone(),
@@ -205,8 +205,8 @@ impl Engine {
             let color = rng.random_range(200..=255);
 
             let pos = Vec2::new(rand_pos_x, rand_pos_y);
-            let radius = 10.0;
-            let scale = 3.0;
+            let radius = 3.0;
+            let scale = 1.0;
 
             // 1. RESERVE ID (Critical for correct linking)
             let id = world.reserve_entity();
@@ -217,17 +217,24 @@ impl Engine {
             let layer_mask = SignalMask::default();
 
             // 3. Create Emitter (Sphere Factory)
-            let emitter = SignalEmitter::emit(
-                signal_field,
-                pos,
-                0.0,    // Rotation (irrelevant for sphere)
-                radius, // Outer Radius
-                0.0,
-                std::f32::consts::TAU, // Cone Angle: 2*PI (Full Sphere)
-                signal_mask,
-                layer_mask,
-                id,
-            );
+            let emitter = SignalEmitter {
+                radius_max: radius,
+                radius_min: 0.0,
+                cone_angle: std::f32::consts::TAU,
+                signal_mask: signal_mask,
+                layer_mask: layer_mask,
+            };
+
+            let signal = Signal {
+                origin: pos,
+                direction: Vec2::new(0.0, 0.0), // Rotation (irrelevant for sphere)
+                outer_radius: radius,           // Outer Radius
+                inner_radius: 0.0,
+                angle_cos: (std::f32::consts::TAU * 0.5).cos(), // Cone Angle: 2*PI (Full Sphere)
+                mask: signal_mask,
+            };
+
+            signal_field.emit(signal, id);
 
             // 4. ATOMIC SPAWN
             // Everything enters the world at the exact same moment
@@ -314,15 +321,18 @@ impl Engine {
                 }
             }
 
+            Self::system_sync_spatial(&mut self.world);
+
             // 2. SIGNAL SYNC LOOP (Updates SignalLayer)
             // We iterate over entities that have BOTH Position and Emitter
-            for (_id, (xform, emitter)) in self.world.query_mut::<(&Transform, &SignalEmitter)>() {
+            for (id, (xform, emitter)) in self.world.query_mut::<(&Transform, &SignalEmitter)>() {
                 // Reposition the signal to match the agent
                 // We split the borrow here: 'pos' is from 'world', 'reposition' is on 'signal_layer'
                 self.signal_field.reposition(
-                    emitter.key,
+                    id,
                     xform.position,
-                    xform.scale, // Keep the radius constant (or pulse it here!)
+                    emitter.radius_min * xform.scale, // Keep the radius constant (or pulse it here!)
+                    emitter.radius_max * xform.scale, // Keep the radius constant (or pulse it here!)
                 );
             }
 
@@ -335,33 +345,56 @@ impl Engine {
 
     fn spawn_dummy_player(world: &mut World, signal_field: &mut SignalField) -> hecs::Entity {
         let player_pos = Vec2::new(512.0, 384.0);
-        let scale = 15.0;
-        //
+        let player_scale = 200.0; // Visual & Physics scale
+
+        // =========================================================
+        // 1. THE PLAYER (Ring Shape)
+        // =========================================================
+        // A. Reserve ID
         let player_id = world.reserve_entity();
-        //
+
+        // B. Define Properties
         let mut signal_mask = SignalMask::default();
         let layer_mask = SignalMask::default();
         signal_mask.set(BIT_BOUNDING_VOLUME, true);
-        //
-        let emitter = SignalEmitter::emit(
-            signal_field,
-            player_pos,
-            0.0,
-            scale,
-            scale - 1.0,
-            2.094, // 120 degrees
-            signal_mask,
-            layer_mask,
-            player_id,
-        );
-        //
+
+        let outer_rad = player_scale; // 15.0
+        let inner_rad = player_scale - 1.0; // 14.0 (Hollow ring)
+        let cone_angle = 2.094; // 120 degrees
+
+        // C. Create Component (Data)
+        // Note: Assuming you want Local Space radius here (1.0) and let Scale (15.0) multiply it.
+        // If your system expects World Space in the component, change radius_max to `outer_rad`.
+        let player_emitter = SignalEmitter {
+            radius_max: 1.0, // Base size
+            radius_min: 0.1, // Normalized inner (14/15)
+            cone_angle: cone_angle,
+            signal_mask: signal_mask,
+            layer_mask: layer_mask,
+        };
+
+        // D. Create Physics Signal (Active)
+        // We must calculate the initial World Space state manually for frame 0
+        let player_signal = Signal {
+            // entity: player_id,
+            origin: player_pos,
+            direction: Vec2::new(1.0, 0.0), // Default 0.0 rotation (Right)
+            outer_radius: outer_rad,
+            inner_radius: inner_rad,
+            angle_cos: (cone_angle * 0.5).cos(),
+            mask: signal_mask,
+        };
+
+        // E. Register & Spawn
+        signal_field.emit(player_signal, player_id);
+
         world.spawn_at(
             player_id,
             (
                 Transform {
                     position: player_pos,
-                    scale: scale,
-                    ..Transform::default()
+                    scale: player_scale,
+                    rotation: 0.0,
                 },
                 Velocity {
                     linear: Vec2::new(200.0, 200.0),
@@ -371,46 +404,60 @@ impl Engine {
                     r: 200,
                     g: 200,
                     b: 200,
-                    a: 200,
+                    a: 100,
                 },
-                emitter,
+                player_emitter,
             ),
         );
 
-        // create yet another signal and sync it to our player
-        let scale = 100.0;
-        let another_id = world.reserve_entity();
-        let emitter = SignalEmitter::emit(
-            signal_field,
-            player_pos,
-            0.0,
-            scale,
-            0.0,
-            TAU, // 120 degrees
-            signal_mask,
-            layer_mask,
-            another_id,
-        );
+        // =========================================================
+        // 2. THE CHILD SCANNER (Omni Sensor)
+        // =========================================================
+        let child_id = world.reserve_entity();
+        let scanner_range = 100.0;
+
+        // Component
+        let child_emitter = SignalEmitter {
+            radius_max: scanner_range, // Large range
+            radius_min: 0.0,
+            cone_angle: std::f32::consts::TAU, // 360 degrees
+            signal_mask: signal_mask,
+            layer_mask: layer_mask,
+            // cache_tile: None,
+        };
+
+        // Physics Signal
+        let child_signal = Signal {
+            // entity: child_id,
+            origin: player_pos, // Starts at parent position
+            direction: Vec2::X,
+            outer_radius: scanner_range,
+            inner_radius: 0.0,
+            angle_cos: -1.0, // cos(PI) for full sphere
+            mask: signal_mask,
+        };
+
+        signal_field.emit(child_signal, child_id);
 
         world.spawn_at(
-            another_id,
+            child_id,
             (
                 Transform {
                     position: player_pos,
-                    scale: scale,
-                    ..Transform::default()
+                    scale: 1.0,
+                    rotation: 0.0,
                 },
                 SpatialAnchor {
                     parent: player_id,
-                    position_offset: Vec2::new(0.0, 0.0),
+                    position_offset: Vec2::ZERO,
                 },
                 Model {
-                    r: 200,
-                    g: 200,
-                    b: 200,
-                    a: 200,
+                    r: 0,
+                    g: 255,
+                    b: 0,
+                    a: 50, // Visual debug (faint green)
                 },
-                emitter,
+                child_emitter,
             ),
         );
 
@@ -430,30 +477,26 @@ impl Engine {
                         *xform = transform;
                         // Update Signal
                         self.signal_field.reposition(
-                            emitter.key,
+                            entity,
                             xform.position,
-                            xform.scale, // Keep the radius constant (or pulse it here!)
+                            // Keep the radius constant (or pulse it here!)
+                            emitter.radius_min * xform.scale,
+                            emitter.radius_max * xform.scale,
                         );
+                        self.signal_field.reshape(entity, xform.rotation, emitter.cone_angle);
                     }
                 }
             }
             State::UpdateSignal(entity, signal) => {
-                if let Ok(mut query) = self.world.query_one::<&mut SignalEmitter>(entity) {
-                    if let Some(emitter) = query.get() {
+                if let Ok(mut query) = self
+                    .world
+                    .query_one::<(&Transform, &mut SignalEmitter)>(entity)
+                {
+                    if let Some((xform, emitter)) = query.get() {
                         // Update Signal
                         *emitter = signal;
-
-                        println!(
-                            "angle {:.} vs TAU {:.}. equal? {}",
-                            emitter.cone_angle,
-                            TAU,
-                            emitter.cone_angle == TAU
-                        );
-                        self.signal_field.reshape(
-                            emitter.key,
-                            emitter.rotation,
-                            emitter.cone_angle,
-                        );
+                        self.signal_field
+                            .reshape(entity, xform.rotation, emitter.cone_angle);
                     }
                 }
             }

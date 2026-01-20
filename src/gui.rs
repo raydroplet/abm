@@ -298,6 +298,21 @@ impl Presenter {
                             }
                         });
                         ui.end_row();
+
+                        // Rotation
+                        ui.label("Rotation");
+                        ui.horizontal(|ui| {
+                            let mut rot_deg = transform.rotation.to_degrees();
+                            ui.label("Z");
+                            let response = ui.add(egui::DragValue::new(&mut rot_deg).speed(1.0));
+                            if response.changed() {
+                                transform.rotation = rot_deg.to_radians();
+                                *command =
+                                    InspectionState::UpdateTransform(view.entity, *transform);
+                            }
+                        });
+                        ui.end_row();
+                        // ui.end_row(); // Double check if you actually need this second end_row(), it creates a double-height gap.
                     });
             });
     }
@@ -316,13 +331,35 @@ impl Presenter {
                             .num_columns(2)
                             .spacing([20.0, 1.0])
                             .show(ui, |ui| {
-                                // ui.label("Radius");
-                                // ui.add(
-                                //     egui::Slider::new(&mut emitter.radius, 0.0..=500.0)
-                                //         .drag_value_speed(0.1)
-                                //         .step_by(0.1),
-                                // );
-                                // ui.end_row();
+                                ui.label("Outer Radius");
+                                let mut radius_max = emitter.radius_max;
+                                if ui
+                                    .add(egui::DragValue::new(&mut radius_max)
+                                        .range(emitter.radius_min..=f32::MAX)
+                                        .speed(0.01)
+                                    )
+                                    .changed()
+                                {
+                                    emitter.radius_max = radius_max;
+                                    *command = InspectionState::UpdateSignal(view.entity, *emitter);
+                                }
+                                ui.end_row();
+
+                                ui.label("Inner Radius");
+                                let mut radius_min = emitter.radius_min;
+                                let max = emitter.radius_max;
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut radius_min, 0.0..=max)
+                                            .drag_value_speed(0.1)
+                                            .step_by(0.00001),
+                                    )
+                                    .changed()
+                                {
+                                    emitter.radius_min = radius_min;
+                                    *command = InspectionState::UpdateSignal(view.entity, *emitter);
+                                }
+                                ui.end_row();
 
                                 ui.label("Aperture");
                                 let mut degrees = emitter.cone_angle.to_degrees();
@@ -331,21 +368,6 @@ impl Presenter {
                                     .changed()
                                 {
                                     emitter.cone_angle = degrees.to_radians();
-                                    *command = InspectionState::UpdateSignal(view.entity, *emitter);
-                                }
-                                ui.end_row();
-
-                                ui.label("Rotation");
-                                let mut rot_deg = emitter.rotation.to_degrees();
-                                if ui
-                                    .add(
-                                        egui::Slider::new(&mut rot_deg, 0.0..=360.0)
-                                            .drag_value_speed(1.0)
-                                            .suffix("°"),
-                                    )
-                                    .changed()
-                                {
-                                    emitter.rotation = rot_deg.to_radians();
                                     *command = InspectionState::UpdateSignal(view.entity, *emitter);
                                 }
                                 ui.end_row();

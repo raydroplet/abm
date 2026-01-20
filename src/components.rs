@@ -6,7 +6,7 @@ use glam::Vec2;
 #[derive(Default, Clone, Copy, Debug)]
 pub struct Transform {
     pub position: Vec2,
-    pub rotation: Vec2,
+    pub rotation: f32,
     pub scale: f32, // should be Vec2, but not supported for now
 }
 
@@ -14,7 +14,7 @@ impl Transform {
     pub fn default() -> Self {
         Self {
             position: Vec2::default(),
-            // rotation: Vec2::new(0.0, 1.0),
+            rotation: 0.0,
             scale: 1.0,
         }
     }
@@ -36,7 +36,8 @@ pub struct Model {
 #[derive(Default, Clone, Copy, Debug)]
 pub struct SignalEmitter {
     // shape
-    pub radius: f32,
+    pub radius_min: f32,
+    pub radius_max: f32,
     pub cone_angle: f32, // 90 degrees = PI/2
     // pub rotation: f32, // 0.0 = Right, PI/2 = Up, PI = Left.
     // properties
