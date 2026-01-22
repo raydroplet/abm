@@ -17,6 +17,7 @@ const BIT_BOUNDING_VOLUME: usize = 0;
 pub struct AgentRenderData {
     pub signal: Signal,
     pub color: [u8; 4],
+    pub label: Option<u8>,
     // Add extra fields here if your shaders need them (e.g., velocity for motion blur)
 }
 
@@ -89,7 +90,7 @@ impl Engine {
         let height = 768.0;
 
         Self::spawn_dummy_entities(width, height, &mut world, &mut signal_field);
-        let id = Self::spawn_dummy_player(&mut world, &mut signal_field);
+        let (player_id, player_vision_id) = Self::spawn_dummy_player(&mut world, &mut signal_field);
 
         Self {
             world,
@@ -100,7 +101,7 @@ impl Engine {
             signal_field, // Store the layer
             camera_dimension: Vec2::new(width, height),
             camera_position: Vec2::new(0.0, 0.0),
-            selected_entity: id,
+            selected_entity: player_vision_id,
         }
     }
 
@@ -132,30 +133,45 @@ impl Engine {
         // let mut filter = SignalMask::<1>::default();
         // filter.set(BIT_RENDER, true);
 
-        // 2. Spatial Query
-        // We only care about agents the camera can actually see
-        self.signal_field.scan_volume_rectangle(
-            self.camera_position,
-            self.camera_dimension + self.camera_position,
-            signal_mask,
-            layer_mask,
-            |signal, entity| {
-                // A. Store signal for the GUI/Debug overlays
-                // if signal.mask != filter {
-                // frame.signals.push(signal.clone());
-                // }
+        // // 2. Spatial Query
+        // // We only care about agents the camera can actually see
+        // self.signal_field.scan_volume_rectangle(
+        //     self.camera_position,
+        //     self.camera_dimension + self.camera_position,
+        //     signal_mask,
+        //     layer_mask,
+        //     |signal, entity| {
+        //         // A. Store signal for the GUI/Debug overlays
+        //         // if signal.mask != filter {
+        //         // frame.signals.push(signal.clone());
+        //         // }
+        //
+        //         // B. Fetch visual data from ECS for the GPU
+        //         if let Ok(mut query) = self.world.query_one::<&Model>(*entity) {
+        //             if let Some(model) = query.get() {
+        //                 frame.agents.push(AgentRenderData {
+        //                     signal: signal.clone(),
+        //                     color: [model.r, model.g, model.b, model.a],
+        //                     label: None,
+        //                 });
+        //             }
+        //         }
+        //     },
+        // );
 
+        self.signal_field
+            .scan(self.selected_entity, layer_mask, |signal, entity| {
                 // B. Fetch visual data from ECS for the GPU
                 if let Ok(mut query) = self.world.query_one::<&Model>(*entity) {
                     if let Some(model) = query.get() {
                         frame.agents.push(AgentRenderData {
                             signal: signal.clone(),
                             color: [model.r, model.g, model.b, model.a],
+                            label: None,
                         });
                     }
                 }
-            },
-        );
+            });
 
         // 3. Metadata
         frame.debug_info.tick_counter = self.tick_counter;
@@ -221,7 +237,8 @@ impl Engine {
                 radius_max: radius,
                 radius_min: 0.0,
                 cone_angle: std::f32::consts::TAU,
-                signal_mask: signal_mask,
+                emit_mask: signal_mask,
+                sense_mask: signal_mask,
                 layer_mask: layer_mask,
             };
 
@@ -231,7 +248,8 @@ impl Engine {
                 outer_radius: radius,           // Outer Radius
                 inner_radius: 0.0,
                 angle_cos: (std::f32::consts::TAU * 0.5).cos(), // Cone Angle: 2*PI (Full Sphere)
-                mask: signal_mask,
+                emit_mask: signal_mask,
+                sense_mask: signal_mask,
             };
 
             signal_field.emit(signal, id);
@@ -298,29 +316,47 @@ impl Engine {
             let tick_time = Instant::now();
 
             // 1. MOVEMENT LOOP (Updates Position)
-            for (_id, (xform, vel)) in self.world.query_mut::<(&mut Transform, &mut Velocity)>() {
-                xform.position.x += vel.linear.x * FIXED_DT;
-                xform.position.y += vel.linear.y * FIXED_DT;
+            // We now query for Anchor optionally.
+            // This lets us differentiate between Roots and Children.
+            for (_id, (xform, vel, anchor_opt)) in
+                self.world
+                    .query_mut::<(&mut Transform, &mut Velocity, Option<&mut SpatialAnchor>)>()
+            {
+                // handles local vs global positions
+                match anchor_opt {
+                    Some(anchor) => {
+                        // the sync system will update the transform world position latter
+                        anchor.position_offset += vel.linear * FIXED_DT;
 
-                // Collision Logic (Bounce off walls)
-                if xform.position.x >= self.camera_dimension.x {
-                    vel.linear.x *= -1.0;
-                    xform.position.x = self.camera_dimension.x;
-                }
-                if xform.position.x <= 0.0 {
-                    vel.linear.x *= -1.0;
-                    xform.position.x = 0.0;
-                }
-                if xform.position.y >= self.camera_dimension.y {
-                    vel.linear.y *= -1.0;
-                    xform.position.y = self.camera_dimension.y;
-                }
-                if xform.position.y <= 0.0 {
-                    vel.linear.y *= -1.0;
-                    xform.position.y = 0.0;
+                        // Note: We skip world-bounds collision for children.
+                        // They stick to their parents even if the parent drags them through a wall.
+                    }
+                    None => {
+                        xform.position += vel.linear * FIXED_DT;
+
+                        // Collision Logic (Bounce off walls)
+                        if xform.position.x >= self.camera_dimension.x {
+                            vel.linear.x *= -1.0;
+                            xform.position.x = self.camera_dimension.x;
+                        }
+                        if xform.position.x <= 0.0 {
+                            vel.linear.x *= -1.0;
+                            xform.position.x = 0.0;
+                        }
+                        if xform.position.y >= self.camera_dimension.y {
+                            vel.linear.y *= -1.0;
+                            xform.position.y = self.camera_dimension.y;
+                        }
+                        if xform.position.y <= 0.0 {
+                            vel.linear.y *= -1.0;
+                            xform.position.y = 0.0;
+                        }
+                    }
                 }
             }
-
+            // 2. SPATIAL SYNC (The Cache Refresh)
+            // This propagates ParentPos + AnchorOffset -> ChildPos
+            // It ensures the Transform is correct before we use it for Signals/Rendering.
             Self::system_sync_spatial(&mut self.world);
 
             // 2. SIGNAL SYNC LOOP (Updates SignalLayer)
@@ -343,49 +379,43 @@ impl Engine {
         }
     }
 
-    fn spawn_dummy_player(world: &mut World, signal_field: &mut SignalField) -> hecs::Entity {
+    fn spawn_dummy_player(world: &mut World, signal_field: &mut SignalField) -> (Entity, Entity) {
         let player_pos = Vec2::new(512.0, 384.0);
-        let player_scale = 200.0; // Visual & Physics scale
+        let player_scale = 20.0;
 
         // =========================================================
         // 1. THE PLAYER (Ring Shape)
         // =========================================================
-        // A. Reserve ID
         let player_id = world.reserve_entity();
 
-        // B. Define Properties
         let mut signal_mask = SignalMask::default();
         let layer_mask = SignalMask::default();
         signal_mask.set(BIT_BOUNDING_VOLUME, true);
 
-        let outer_rad = player_scale; // 15.0
-        let inner_rad = player_scale - 1.0; // 14.0 (Hollow ring)
-        let cone_angle = 2.094; // 120 degrees
+        let outer_rad = player_scale;
+        let inner_rad = 0.0;
+        let cone_angle = TAU;
+        // let cone_angle = 2.094; // 120 degrees
 
-        // C. Create Component (Data)
-        // Note: Assuming you want Local Space radius here (1.0) and let Scale (15.0) multiply it.
-        // If your system expects World Space in the component, change radius_max to `outer_rad`.
         let player_emitter = SignalEmitter {
             radius_max: 1.0, // Base size
             radius_min: 0.1, // Normalized inner (14/15)
             cone_angle: cone_angle,
-            signal_mask: signal_mask,
+            emit_mask: signal_mask,
+            sense_mask: signal_mask,
             layer_mask: layer_mask,
         };
 
-        // D. Create Physics Signal (Active)
-        // We must calculate the initial World Space state manually for frame 0
         let player_signal = Signal {
-            // entity: player_id,
             origin: player_pos,
             direction: Vec2::new(1.0, 0.0), // Default 0.0 rotation (Right)
             outer_radius: outer_rad,
             inner_radius: inner_rad,
             angle_cos: (cone_angle * 0.5).cos(),
-            mask: signal_mask,
+            emit_mask: signal_mask,
+            sense_mask: signal_mask,
         };
 
-        // E. Register & Spawn
         signal_field.emit(player_signal, player_id);
 
         world.spawn_at(
@@ -396,14 +426,14 @@ impl Engine {
                     scale: player_scale,
                     rotation: 0.0,
                 },
-                Velocity {
-                    linear: Vec2::new(200.0, 200.0),
-                    ..Velocity::default()
-                },
+                // Velocity {
+                //     linear: Vec2::new(200.0, 200.0),
+                //     ..Velocity::default()
+                // },
                 Model {
-                    r: 200,
+                    r: 000,
                     g: 200,
-                    b: 200,
+                    b: 000,
                     a: 100,
                 },
                 player_emitter,
@@ -413,38 +443,39 @@ impl Engine {
         // =========================================================
         // 2. THE CHILD SCANNER (Omni Sensor)
         // =========================================================
-        let child_id = world.reserve_entity();
-        let scanner_range = 100.0;
+        let player_vision_id = world.reserve_entity();
+        let scanner_range = 1.0;
+        let scale = 20.0;
+        let cone_angle = TAU / 4.0;
 
         // Component
         let child_emitter = SignalEmitter {
             radius_max: scanner_range, // Large range
             radius_min: 0.0,
-            cone_angle: std::f32::consts::TAU, // 360 degrees
-            signal_mask: signal_mask,
+            cone_angle: cone_angle,
+            emit_mask: signal_mask,
+            sense_mask: signal_mask,
             layer_mask: layer_mask,
-            // cache_tile: None,
         };
 
-        // Physics Signal
         let child_signal = Signal {
-            // entity: child_id,
             origin: player_pos, // Starts at parent position
             direction: Vec2::X,
             outer_radius: scanner_range,
             inner_radius: 0.0,
-            angle_cos: -1.0, // cos(PI) for full sphere
-            mask: signal_mask,
+            angle_cos: (cone_angle * 0.5).cos(), // cos(PI) for full sphere
+            emit_mask: signal_mask,
+            sense_mask: signal_mask,
         };
 
-        signal_field.emit(child_signal, child_id);
+        signal_field.emit(child_signal, player_vision_id);
 
         world.spawn_at(
-            child_id,
+            player_vision_id,
             (
                 Transform {
                     position: player_pos,
-                    scale: 1.0,
+                    scale: scale,
                     rotation: 0.0,
                 },
                 SpatialAnchor {
@@ -452,29 +483,39 @@ impl Engine {
                     position_offset: Vec2::ZERO,
                 },
                 Model {
-                    r: 0,
-                    g: 255,
-                    b: 0,
-                    a: 50, // Visual debug (faint green)
+                    r: 200,
+                    g: 200,
+                    b: 200,
+                    a: 100,
                 },
                 child_emitter,
             ),
         );
 
-        player_id
+        (player_id, player_vision_id)
     }
 
     pub fn handle(&mut self, command: InspectionState) {
         type State = InspectionState;
         match command {
-            State::UpdateTransform(entity, transform) => {
+            State::UpdateTransform(entity, new_transform) => {
+                // 1. Update the Transform (Cache)
+                if let Ok(mut xform) = self.world.get::<&mut Transform>(entity) {
+                    *xform = new_transform;
+                }
+
+                // 2. Update the Anchor
+                if let Ok(mut anchor) = self.world.get::<&mut SpatialAnchor>(entity) {
+                    if let Ok(parent_xform) = self.world.get::<&Transform>(anchor.parent) {
+                        anchor.position_offset = new_transform.position - parent_xform.position;
+                    }
+                }
+
                 if let Ok(mut query) = self
                     .world
                     .query_one::<(&mut Transform, &SignalEmitter)>(entity)
                 {
                     if let Some((xform, emitter)) = query.get() {
-                        // Update Component
-                        *xform = transform;
                         // Update Signal
                         self.signal_field.reposition(
                             entity,
@@ -483,7 +524,8 @@ impl Engine {
                             emitter.radius_min * xform.scale,
                             emitter.radius_max * xform.scale,
                         );
-                        self.signal_field.reshape(entity, xform.rotation, emitter.cone_angle);
+                        self.signal_field
+                            .reshape(entity, xform.rotation, emitter.cone_angle);
                     }
                 }
             }

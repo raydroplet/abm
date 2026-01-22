@@ -54,7 +54,8 @@ pub struct Signal<const N: usize = 1> {
     // pub falloff: f32,   // How fast it fades?
     // data
     // pub entity: Entity, // may not even be needed since systems deal with components
-    pub mask: SignalMask, // SignalType bit mask
+    pub emit_mask: SignalMask,
+    pub sense_mask: SignalMask,
 }
 //
 // impl Signal {
@@ -389,6 +390,60 @@ impl SignalField {
         }
     }
 
+    pub fn scan(
+        &self,
+        key: SignalKey,
+        layer_mask: LevelMask,
+        mut callback: impl FnMut(&Signal, &SignalKey),
+    ) {
+        let scanning = self.active_levels & layer_mask;
+        let signal = self.store.get(&key).expect("Invalid key");
+
+        // 1. BROAD PHASE: Calculate a loose Bounding Box
+        // Optimizing the AABB of a rotated cone is hard.
+        // It is much faster to just query the square AABB of the full radius.
+        // It over-selects tiles, but the Narrow Phase filters them out cheaply.
+        let min_aabb = signal.origin - Vec2::splat(signal.outer_radius);
+        let max_aabb = signal.origin + Vec2::splat(signal.outer_radius);
+
+        for level in scanning.iter_ones() {
+            let cell_size = (1 << level) as f32;
+
+            // Standard Grid Iteration (Same as scan_aabb)
+            let min_gx = (min_aabb.x / cell_size).floor() as i32 - 1;
+            let max_gx = (max_aabb.x / cell_size).floor() as i32 + 1;
+            let min_gy = (min_aabb.y / cell_size).floor() as i32 - 1;
+            let max_gy = (max_aabb.y / cell_size).floor() as i32 + 1;
+
+            for gx in min_gx..=max_gx {
+                for gy in min_gy..=max_gy {
+                    if let Some(bucket) = self.grid.get(&TileKey {
+                        level: level as u8,
+                        x: gx,
+                        y: gy,
+                    }) {
+                        for (key, sig_mask) in bucket {
+                            if (*sig_mask & signal.sense_mask).any() {
+                                if let Some(sig) = self.store.get(key) {
+                                    // 2. NARROW PHASE: Cone vs Circle Intersection
+                                    if self.check_intersection_cone(
+                                        signal.origin,
+                                        signal.direction,
+                                        signal.angle_cos,
+                                        signal.outer_radius,
+                                        sig,
+                                    ) {
+                                        callback(sig, key);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn scan_cone_occluded(
         &self,
         origin: Vec2,
@@ -540,12 +595,12 @@ impl SignalField {
 
                     // 2. Check if visible (REPLACES: != 0)
                     // .any() returns true if the mask contains at least one '1'
-                    if visible_bits.any() && (sig.mask & target_mask).any() {
+                    if visible_bits.any() && (sig.emit_mask & target_mask).any() {
                         callback(sig, visible_bits);
                     }
 
                     // 3. Update Occlusion
-                    if (sig.mask & occluder_mask).any() {
+                    if (sig.emit_mask & occluder_mask).any() {
                         // If |= gives you trouble, use the explicit form:
                         occlusion_buffer = occlusion_buffer | proj_mask;
                     }
@@ -604,7 +659,7 @@ impl SignalField {
         level_counts[level] += 1;
 
         // 2. Insert into Grid
-        grid.entry(tile_key).or_default().push((key, signal.mask));
+        grid.entry(tile_key).or_default().push((key, signal.emit_mask));
     }
 
     // fn check_collision_hollow_sphere(&self, pos: Vec2, sig: &Signal) -> bool {

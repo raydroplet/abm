@@ -1,6 +1,6 @@
 // components.rs
 
-use crate::wave::{LevelMask, Signal, SignalField, SignalKey, SignalMask};
+use crate::wave::{LevelMask, SignalMask};
 use glam::Vec2;
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -41,8 +41,11 @@ pub struct SignalEmitter {
     pub cone_angle: f32, // 90 degrees = PI/2
     // pub rotation: f32, // 0.0 = Right, PI/2 = Up, PI = Left.
     // properties
-    pub signal_mask: SignalMask,
+    // pub signal_mask: SignalMask,
     pub layer_mask: LevelMask,
+    //
+    pub emit_mask: SignalMask,
+    pub sense_mask: SignalMask,
 }
 
 // impl SignalEmitter {
