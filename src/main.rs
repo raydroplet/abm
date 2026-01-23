@@ -18,7 +18,7 @@ fn main() -> eframe::Result<()> {
     let (presenter_tx, producer_rx) = crossbeam::bounded(2);
 
     // // Command channel
-    let (command_tx, command_rx) = crossbeam::unbounded();
+    let (command_tx, command_rx) = crossbeam::bounded(1);
 
     // 2. Setup Classes
     let engine = Engine::new();

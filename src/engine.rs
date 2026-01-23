@@ -430,7 +430,7 @@ impl Engine {
                     rotation: 0.0,
                 },
                 // Velocity {
-                //     linear: Vec2::new(200.0, 200.0),
+                //     linear: Vec2::new(100.0, 100.0),
                 //     ..Velocity::default()
                 // },
                 Model {
@@ -545,6 +545,11 @@ impl Engine {
                     if let Some((xform, emitter)) = query.get() {
                         // Update Signal
                         *emitter = signal;
+                        self.signal_field.reposition(
+                            entity,
+                            xform.position,
+                            emitter.radius_max * xform.scale,
+                        );
                         self.signal_field.reshape(
                             entity,
                             xform.rotation,

@@ -12,6 +12,7 @@ use std::thread;
 pub enum ProducerCommand {
     PLAY,
     PAUSE,
+    STEP,
 }
 
 pub enum Command {
@@ -31,6 +32,7 @@ pub struct Producer {
     command_receiver: crossbeam::Receiver<Command>,
     //
     to_tick: bool,
+single_step: bool,
 }
 
 impl Producer {
@@ -44,6 +46,7 @@ impl Producer {
             receiver: engine_receiver,
             command_receiver: command_receiver,
             to_tick: true,
+            single_step: false,
         }
     }
 
@@ -63,8 +66,9 @@ impl Producer {
                     Err(_) => {}
                 }
 
-                if self.to_tick {
+                if self.to_tick || self.single_step {
                     engine.tick();
+                    self.single_step = false;
                 }
 
                 match self.receiver.try_recv() {
@@ -99,6 +103,9 @@ impl Producer {
             ProducerCommand::PAUSE => {
                 self.to_tick = false;
             }
+            ProducerCommand::STEP => {
+                self.single_step = true;
+            }
         }
     }
 }
@@ -117,6 +124,7 @@ pub struct Presenter {
     last_tick_count: u64,   // Snapshot of total ticks 0.5s ago
     last_measure_time: f64, // Timestamp of the last check
     display_ups: u64,
+    selected_grid_level: usize,
     //
     // local "Double Buffer"
     // It stays here so we can draw it even if the engine is busy ticking.
@@ -137,6 +145,7 @@ impl Presenter {
             last_tick_count: 0,
             last_measure_time: 0.0,
             display_ups: 0,
+            selected_grid_level: 0,
             //
             current_frame: Option::default(),
         }
@@ -181,27 +190,15 @@ impl Presenter {
         )
     }
 
-    // fn resolve_signal_color(sig: &Signal, alpha: u8) -> egui::Color32 {
-    //     match sig.mask.trailing_ones() {
-    //         0 => egui::Color32::from_rgba_unmultiplied(255, 50, 50, alpha), // Bit 0: Red (Sound)
-    //         1 => egui::Color32::from_rgba_unmultiplied(50, 255, 50, alpha), // Bit 1: Green (Smell)
-    //         2 => egui::Color32::from_rgba_unmultiplied(50, 100, 255, alpha), // Bit 2: Blue (Radio)
-    //         3 => egui::Color32::from_rgba_unmultiplied(255, 255, 0, alpha), // Bit 3: Yellow (Light)
-    //         4 => egui::Color32::from_rgba_unmultiplied(255, 0, 255, alpha), // Bit 4: Magenta (Magic)
-    //         5 => egui::Color32::from_rgba_unmultiplied(0, 255, 255, alpha), // Bit 5: Cyan (Electric)
-    //         6 => egui::Color32::from_rgba_unmultiplied(255, 140, 0, alpha), // Bit 6: Orange (Heat)
-    //         7 => egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha), // Bit 7: White (Debug)
-    //         _ => panic!(),
-    //     }
-    // }
-
     fn render_hierarchy_window(
         ctx: &egui::Context,
         frame: &mut FrameData,
         command_channel: &mut crossbeam::Sender<Command>,
     ) {
+        let padding = 5.0;
         egui::Window::new("Scene Hierarchy")
-            .pivot(egui::Align2::RIGHT_BOTTOM)
+            .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(padding, -padding))
+            .pivot(egui::Align2::LEFT_BOTTOM)
             .default_width(200.0)
             .default_height(400.0)
             .vscroll(false) // We handle scrolling manually with show_rows
@@ -240,7 +237,7 @@ impl Presenter {
                                     // 5. Send Command
                                     // We write to the command buffer. The engine will pick this up
                                     // next tick and populate 'inspection_view' with the new data.
-                                    command_channel
+                                    let _ = command_channel
                                         .send(EngineCommand::SelectEntity(*entity).into());
                                 }
                             }
@@ -250,10 +247,13 @@ impl Presenter {
             });
     }
 
-    fn render_debug_window(ctx: &egui::Context, 
-        frame: &FrameData, 
+    fn render_debug_window(
+        ctx: &egui::Context,
+        frame: &FrameData,
         command_channel: &mut crossbeam::Sender<Command>,
-        display_ups: u64) {
+        display_ups: u64,
+        selected_level: &mut usize,
+    ) {
         let padding = 5.0;
         egui::Window::new("Monitor")
             .resizable(false)
@@ -268,7 +268,45 @@ impl Presenter {
                     if ui.button("⏸ Pause").clicked() {
                         let _ = command_channel.send(Command::Producer(ProducerCommand::PAUSE));
                     }
+                    if ui.button("⏭  Step").clicked() {
+                        let _ = command_channel.send(Command::Producer(ProducerCommand::STEP));
+                    }
                 });
+                ui.separator();
+                ///////////////////////
+                // 1. Collect only the indices that are actually active in the grid
+                let active_indices: Vec<usize> =
+                    frame.debug_info.active_levels_mask.iter_ones().collect();
+
+                if !active_indices.is_empty() {
+                    // 2. We need to find the "index of the current level" in our active list
+                    // to keep the slider position consistent.
+                    let mut current_selection_idx = active_indices
+                        .iter()
+                        .position(|&idx| idx == *selected_level)
+                        .unwrap_or(0);
+
+                    // 3. Slider over the AVAILABLE indices only
+                    let max_idx = active_indices.len() - 1;
+                    let res = ui.add(
+                        egui::Slider::new(&mut current_selection_idx, 0..=max_idx)
+                            .custom_formatter(|idx, _| {
+                                // Show the actual Level value (e.g. "Level 5") rather than the list index
+                                format!("Level {}", active_indices[idx as usize])
+                            }),
+                    );
+
+                    // 4. Update the actual selected_level if the slider moved
+                    if res.changed() {
+                        *selected_level = active_indices[current_selection_idx];
+                    }
+
+                    // Display the pixel size for the currently active choice
+                    ui.label(format!("Cell Size: {}px", 1 << *selected_level));
+                } else {
+                    ui.colored_label(egui::Color32::GRAY, "No active spatial levels");
+                }
+                ///////////////////////
                 ui.separator();
 
                 // 1. Performance Metrics
@@ -380,7 +418,7 @@ impl Presenter {
                             let response =
                                 ui.add(egui::DragValue::new(&mut transform.position.x).speed(1.0));
                             if response.changed() {
-                                command_channel.send(
+                                let _ = command_channel.send(
                                     EngineCommand::UpdateTransform(view.entity, *transform).into(),
                                 );
                             }
@@ -388,7 +426,7 @@ impl Presenter {
                             let response =
                                 ui.add(egui::DragValue::new(&mut transform.position.y).speed(1.0));
                             if response.changed() {
-                                command_channel.send(
+                                let _ = command_channel.send(
                                     EngineCommand::UpdateTransform(view.entity, *transform).into(),
                                 );
                             }
@@ -402,7 +440,7 @@ impl Presenter {
                             let response =
                                 ui.add(egui::DragValue::new(&mut transform.scale).speed(1.0));
                             if response.changed() {
-                                command_channel.send(
+                                let _ = command_channel.send(
                                     EngineCommand::UpdateTransform(view.entity, *transform).into(),
                                 );
                             }
@@ -410,7 +448,7 @@ impl Presenter {
                             let response =
                                 ui.add(egui::DragValue::new(&mut transform.scale).speed(1.0));
                             if response.changed() {
-                                command_channel.send(
+                                let _ = command_channel.send(
                                     EngineCommand::UpdateTransform(view.entity, *transform).into(),
                                 );
                             }
@@ -425,7 +463,7 @@ impl Presenter {
                             let response = ui.add(egui::DragValue::new(&mut rot_deg).speed(1.0));
                             if response.changed() {
                                 transform.rotation = rot_deg.to_radians();
-                                command_channel.send(
+                                let _ = command_channel.send(
                                     EngineCommand::UpdateTransform(view.entity, *transform).into(),
                                 );
                             }
@@ -451,17 +489,15 @@ impl Presenter {
                             .spacing([20.0, 1.0])
                             .show(ui, |ui| {
                                 ui.label("Outer Radius");
-                                let mut radius_max = emitter.radius_max;
                                 if ui
                                     .add(
-                                        egui::DragValue::new(&mut radius_max)
+                                        egui::DragValue::new(&mut emitter.radius_max)
                                             .range(emitter.radius_min..=f32::MAX)
                                             .speed(0.01),
                                     )
                                     .changed()
                                 {
-                                    emitter.radius_max = radius_max;
-                                    command_channel.send(
+                                    let _ = command_channel.send(
                                         EngineCommand::UpdateSignal(view.entity, *emitter).into(),
                                     );
                                 }
@@ -479,7 +515,7 @@ impl Presenter {
                                     .changed()
                                 {
                                     emitter.radius_min = radius_min;
-                                    command_channel.send(
+                                    let _ = command_channel.send(
                                         EngineCommand::UpdateSignal(view.entity, *emitter).into(),
                                     );
                                 }
@@ -492,7 +528,7 @@ impl Presenter {
                                     .changed()
                                 {
                                     emitter.cone_angle = degrees.to_radians();
-                                    command_channel.send(
+                                    let _ = command_channel.send(
                                         EngineCommand::UpdateSignal(view.entity, *emitter).into(),
                                     );
                                 }
@@ -653,20 +689,6 @@ impl Presenter {
                     origin
                 };
 
-                // Add to Mesh (Triangle Strip Logic)
-                // We add two vertices (Outer, Inner) per step.
-                // egui::Mesh uses indexed triangles, but we can just add quads manually.
-                if i > 0 {
-                    let idx = mesh.vertices.len() as u32;
-                    // Previous Outer, Previous Inner
-                    // Current Outer, Current Inner
-                    // We need the indices of the PREVIOUS two points (idx-2, idx-1)
-                    // and the CURRENT two points (which we are about to add).
-
-                    // Actually, simpler approach: Just add colored vertices and let egui triangulate?
-                    // No, manual indices are safest.
-                }
-
                 // Let's use the simplest robust method:
                 // Add vertices, then add indices for a Quad connecting to the previous step.
 
@@ -725,6 +747,48 @@ impl Presenter {
             }));
         }
     }
+
+    fn render_grid(painter: &egui::Painter, frame: &FrameData, selected_level: usize) {
+        // 1. Check if the level is actually active
+        let mask = frame.debug_info.active_levels_mask;
+        if !mask[selected_level] {
+            return;
+        }
+
+        // 2. Derive geometry
+        let cell_size = (1u64 << selected_level) as f32;
+        let screen_rect = painter.clip_rect();
+
+        // Choose a "Blue Hour" indigo: faint, but visible
+        let grid_color = egui::Color32::from_rgba_unmultiplied(63, 81, 181, 40);
+        let stroke = egui::Stroke::new(1.0, grid_color);
+
+        // 3. Draw Vertical Lines
+        let mut x = (screen_rect.min.x / cell_size).floor() * cell_size;
+        while x <= screen_rect.max.x {
+            painter.line_segment(
+                [
+                    egui::pos2(x, screen_rect.min.y),
+                    egui::pos2(x, screen_rect.max.y),
+                ],
+                stroke,
+            );
+            x += cell_size;
+        }
+
+        // 4. Draw Horizontal Lines
+        let mut y = (screen_rect.min.y / cell_size).floor() * cell_size;
+        while y <= screen_rect.max.y {
+            painter.line_segment(
+                [
+                    egui::pos2(screen_rect.min.x, y),
+                    egui::pos2(screen_rect.max.x, y),
+                ],
+                stroke,
+            );
+            y += cell_size;
+        }
+    }
 }
 
 impl eframe::App for Presenter {
@@ -765,6 +829,20 @@ impl eframe::App for Presenter {
                 self.last_measure_time = time;
             }
 
+            // Grid default
+            let mask = frame.debug_info.active_levels_mask;
+
+            // Only snap if the current level is no longer valid
+            if !mask[self.selected_grid_level] {
+                // Find the closest active bit index
+                if let Some(closest) = mask
+                    .iter_ones()
+                    .min_by_key(|&bit| (bit as i32 - self.selected_grid_level as i32).abs())
+                {
+                    self.selected_grid_level = closest;
+                }
+            }
+
             // Render loop (Modifies frame.inspection_view)
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(egui::Color32::from_rgb(10, 10, 15)))
@@ -772,8 +850,15 @@ impl eframe::App for Presenter {
                     let painter = ui.painter();
                     // Self::render_waves(painter, frame);
                     Self::render_agents(painter, frame);
-                    Self::render_hierarchy_window(ctx, frame, &mut self.command_sender); // WARN: implement-me
-                    Self::render_debug_window(ctx, frame, &mut self.command_sender, self.display_ups);
+                    Self::render_grid(painter, frame, self.selected_grid_level);
+                    Self::render_hierarchy_window(ctx, frame, &mut self.command_sender);
+                    Self::render_debug_window(
+                        ctx,
+                        frame,
+                        &mut self.command_sender,
+                        self.display_ups,
+                        &mut self.selected_grid_level,
+                    );
 
                     // This is where the frame data is modified
                     Self::render_inspection_window(
