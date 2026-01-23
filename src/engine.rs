@@ -367,7 +367,7 @@ impl Engine {
                 self.signal_field.reposition(
                     id,
                     xform.position,
-                    emitter.radius_min * xform.scale, // Keep the radius constant (or pulse it here!)
+                    // emitter.radius_min * xform.scale, // Keep the radius constant (or pulse it here!)
                     emitter.radius_max * xform.scale, // Keep the radius constant (or pulse it here!)
                 );
             }
@@ -526,11 +526,14 @@ impl Engine {
                             entity,
                             xform.position,
                             // Keep the radius constant (or pulse it here!)
-                            emitter.radius_min * xform.scale,
                             emitter.radius_max * xform.scale,
                         );
-                        self.signal_field
-                            .reshape(entity, xform.rotation, emitter.cone_angle);
+                        self.signal_field.reshape(
+                            entity,
+                            xform.rotation,
+                            emitter.cone_angle,
+                            emitter.radius_min * xform.scale,
+                        );
                     }
                 }
             }
@@ -542,8 +545,12 @@ impl Engine {
                     if let Some((xform, emitter)) = query.get() {
                         // Update Signal
                         *emitter = signal;
-                        self.signal_field
-                            .reshape(entity, xform.rotation, emitter.cone_angle);
+                        self.signal_field.reshape(
+                            entity,
+                            xform.rotation,
+                            emitter.cone_angle,
+                            emitter.radius_min * xform.scale,
+                        );
                     }
                 }
             }

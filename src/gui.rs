@@ -240,7 +240,8 @@ impl Presenter {
                                     // 5. Send Command
                                     // We write to the command buffer. The engine will pick this up
                                     // next tick and populate 'inspection_view' with the new data.
-                                    command_channel.send(EngineCommand::SelectEntity(*entity).into());
+                                    command_channel
+                                        .send(EngineCommand::SelectEntity(*entity).into());
                                 }
                             }
                         }
@@ -249,7 +250,10 @@ impl Presenter {
             });
     }
 
-    fn render_debug_window(ctx: &egui::Context, frame: &FrameData, display_ups: u64) {
+    fn render_debug_window(ctx: &egui::Context, 
+        frame: &FrameData, 
+        command_channel: &mut crossbeam::Sender<Command>,
+        display_ups: u64) {
         let padding = 5.0;
         egui::Window::new("Monitor")
             .resizable(false)
@@ -257,6 +261,16 @@ impl Presenter {
             .default_pos([padding, padding])
             .default_width(0.0)
             .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("▶ Play").clicked() {
+                        let _ = command_channel.send(Command::Producer(ProducerCommand::PLAY));
+                    }
+                    if ui.button("⏸ Pause").clicked() {
+                        let _ = command_channel.send(Command::Producer(ProducerCommand::PAUSE));
+                    }
+                });
+                ui.separator();
+
                 // 1. Performance Metrics
                 let fps = 1.0 / ctx.input(|i| i.stable_dt);
                 ui.horizontal(|ui| {
@@ -759,7 +773,7 @@ impl eframe::App for Presenter {
                     // Self::render_waves(painter, frame);
                     Self::render_agents(painter, frame);
                     Self::render_hierarchy_window(ctx, frame, &mut self.command_sender); // WARN: implement-me
-                    Self::render_debug_window(ctx, frame, self.display_ups);
+                    Self::render_debug_window(ctx, frame, &mut self.command_sender, self.display_ups);
 
                     // This is where the frame data is modified
                     Self::render_inspection_window(

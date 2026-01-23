@@ -156,13 +156,7 @@ impl SignalField {
     }
 
     /// updates Position and radius
-    pub fn reposition(
-        &mut self,
-        key: SignalKey,
-        new_pos: Vec2,
-        inner_radius: f32,
-        outer_radius: f32,
-    ) {
+    pub fn reposition(&mut self, key: SignalKey, new_pos: Vec2, outer_radius: f32) {
         // 1. SPLIT SELF
         let Self {
             store,
@@ -194,7 +188,6 @@ impl SignalField {
         if old_tile == new_tile {
             signal.origin = new_pos;
             signal.outer_radius = outer_radius;
-            signal.inner_radius = inner_radius;
             return;
         }
 
@@ -217,7 +210,6 @@ impl SignalField {
         // 4. Update the Signal (In Place)
         signal.origin = new_pos;
         signal.outer_radius = outer_radius;
-        signal.inner_radius = inner_radius;
 
         // 5. Add to NEW grid
         // internal_add calculates the key based on the *current* signal state, which we just updated.
@@ -226,7 +218,13 @@ impl SignalField {
 
     /// Updates the facing direction and field-of-view of a signal.
     /// This is O(1) as it does not require updating the spatial grid.
-    pub fn reshape(&mut self, key: SignalKey, new_direction_radians: f32, new_angle_radians: f32) {
+    pub fn reshape(
+        &mut self,
+        key: SignalKey,
+        new_direction_radians: f32,
+        new_angle_radians: f32,
+        inner_radius: f32,
+    ) {
         if let Some(signal) = self.store.get_mut(&key) {
             // 1. Update Direction
             // We convert the angle back into a normalized Vec2
@@ -241,6 +239,7 @@ impl SignalField {
             // - Aperture 360 deg (2 PI) -> Half PI -> cos(-1.0) -> Omni
             // - Aperture 90 deg (PI/2)  -> Half PI/4 -> cos(0.707)
             signal.angle_cos = (new_angle_radians * 0.5).cos();
+            signal.inner_radius = inner_radius;
         }
     }
 
@@ -738,7 +737,9 @@ impl SignalField {
             let dir_to_target = to_target / dist;
 
             // A. Viewer Cone (Alpha)
-            let sin_alpha = (1.0 - viewer_cone.angle_cos * viewer_cone.angle_cos).max(0.0).sqrt();
+            let sin_alpha = (1.0 - viewer_cone.angle_cos * viewer_cone.angle_cos)
+                .max(0.0)
+                .sqrt();
 
             // B. Target Width (Beta)
             let ratio = (target_radius / dist).min(1.0);
