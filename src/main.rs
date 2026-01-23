@@ -18,12 +18,12 @@ fn main() -> eframe::Result<()> {
     let (presenter_tx, producer_rx) = crossbeam::bounded(2);
 
     // // Command channel
-    // let (command_tx, command_rx) = crossbeam::unbounded();
+    let (command_tx, command_rx) = crossbeam::unbounded();
 
     // 2. Setup Classes
     let engine = Engine::new();
-    let producer = Producer::new(producer_rx, producer_tx/* , command_rx */);
-    let presenter = Presenter::new(presenter_rx, presenter_tx/* , command_tx */);
+    let producer = Producer::new(producer_rx, producer_tx , command_rx);
+    let presenter = Presenter::new(presenter_rx, presenter_tx, command_tx);
 
     // 3. Execution
     producer.run_thread(engine); // Spawns background thread

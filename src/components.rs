@@ -89,6 +89,11 @@ pub struct LifecycleAnchor {
     pub parent: hecs::Entity,
 }
 
+#[derive(Debug, Clone)]
+pub struct Label {
+    pub name: String,
+}
+
 // pub struct DebugCamera {
 //     level_mask: LevelMask,
 //     signal_mask: SignalMask,

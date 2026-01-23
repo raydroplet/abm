@@ -333,62 +333,62 @@ impl SignalField {
         }
     }
 
-    pub fn scan_volume_cone(
-        &self,
-        origin: Vec2,
-        direction: Vec2,
-        angle_cos: f32,
-        outer_radius: f32,
-        query_mask: SignalMask,
-        layer_mask: LevelMask,
-        mut callback: impl FnMut(&Signal),
-    ) {
-        let scanning = self.active_levels & layer_mask;
-
-        // 1. BROAD PHASE: Calculate a loose Bounding Box
-        // Optimizing the AABB of a rotated cone is hard.
-        // It is much faster to just query the square AABB of the full radius.
-        // It over-selects tiles, but the Narrow Phase filters them out cheaply.
-        let min_aabb = origin - Vec2::splat(outer_radius);
-        let max_aabb = origin + Vec2::splat(outer_radius);
-
-        for level in scanning.iter_ones() {
-            let cell_size = (1 << level) as f32;
-
-            // Standard Grid Iteration (Same as scan_aabb)
-            let min_gx = (min_aabb.x / cell_size).floor() as i32 - 1;
-            let max_gx = (max_aabb.x / cell_size).floor() as i32 + 1;
-            let min_gy = (min_aabb.y / cell_size).floor() as i32 - 1;
-            let max_gy = (max_aabb.y / cell_size).floor() as i32 + 1;
-
-            for gx in min_gx..=max_gx {
-                for gy in min_gy..=max_gy {
-                    if let Some(bucket) = self.grid.get(&TileKey {
-                        level: level as u8,
-                        x: gx,
-                        y: gy,
-                    }) {
-                        for (key, sig_mask) in bucket {
-                            if (*sig_mask & query_mask).any() {
-                                if let Some(sig) = self.store.get(key) {
-                                    // 2. NARROW PHASE: Cone vs Circle Intersection
-                                    if self.check_intersection_cone(
-                                        origin,
-                                        direction,
-                                        angle_cos,
-                                        outer_radius,
-                                        sig,
-                                    ) {
-                                        callback(sig);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // pub fn scan_volume_cone(
+    //     &self,
+    //     origin: Vec2,
+    //     direction: Vec2,
+    //     angle_cos: f32,
+    //     outer_radius: f32,
+    //     query_mask: SignalMask,
+    //     layer_mask: LevelMask,
+    //     mut callback: impl FnMut(&Signal),
+    // ) {
+    //     let scanning = self.active_levels & layer_mask;
+    //
+    //     // 1. BROAD PHASE: Calculate a loose Bounding Box
+    //     // Optimizing the AABB of a rotated cone is hard.
+    //     // It is much faster to just query the square AABB of the full radius.
+    //     // It over-selects tiles, but the Narrow Phase filters them out cheaply.
+    //     let min_aabb = origin - Vec2::splat(outer_radius);
+    //     let max_aabb = origin + Vec2::splat(outer_radius);
+    //
+    //     for level in scanning.iter_ones() {
+    //         let cell_size = (1 << level) as f32;
+    //
+    //         // Standard Grid Iteration (Same as scan_aabb)
+    //         let min_gx = (min_aabb.x / cell_size).floor() as i32 - 1;
+    //         let max_gx = (max_aabb.x / cell_size).floor() as i32 + 1;
+    //         let min_gy = (min_aabb.y / cell_size).floor() as i32 - 1;
+    //         let max_gy = (max_aabb.y / cell_size).floor() as i32 + 1;
+    //
+    //         for gx in min_gx..=max_gx {
+    //             for gy in min_gy..=max_gy {
+    //                 if let Some(bucket) = self.grid.get(&TileKey {
+    //                     level: level as u8,
+    //                     x: gx,
+    //                     y: gy,
+    //                 }) {
+    //                     for (key, sig_mask) in bucket {
+    //                         if (*sig_mask & query_mask).any() {
+    //                             if let Some(target_signal) = self.store.get(key) {
+    //                                 // 2. NARROW PHASE: Cone vs Circle Intersection
+    //                                 if self.check_intersection_cone(
+    //                                     origin,
+    //                                     direction,
+    //                                     angle_cos,
+    //                                     outer_radius,
+    //                                     target_signal,
+    //                                 ) {
+    //                                     callback(target_signal);
+    //                                 }
+    //                             }
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
 
     pub fn scan(
         &self,
@@ -401,8 +401,9 @@ impl SignalField {
 
         // 1. BROAD PHASE: Calculate a loose Bounding Box
         // Optimizing the AABB of a rotated cone is hard.
-        // It is much faster to just query the square AABB of the full radius.
-        // It over-selects tiles, but the Narrow Phase filters them out cheaply.
+        // query the square AABB of the full (circle) radius.
+        // It over-selects tiles, the Narrow Phase filters them out.
+        // A better bounding box algorithm may benifit in high range scenarios.
         let min_aabb = signal.origin - Vec2::splat(signal.outer_radius);
         let max_aabb = signal.origin + Vec2::splat(signal.outer_radius);
 
@@ -424,16 +425,10 @@ impl SignalField {
                     }) {
                         for (key, sig_mask) in bucket {
                             if (*sig_mask & signal.sense_mask).any() {
-                                if let Some(sig) = self.store.get(key) {
+                                if let Some(target) = self.store.get(key) {
                                     // 2. NARROW PHASE: Cone vs Circle Intersection
-                                    if self.check_intersection_cone(
-                                        signal.origin,
-                                        signal.direction,
-                                        signal.angle_cos,
-                                        signal.outer_radius,
-                                        sig,
-                                    ) {
-                                        callback(sig, key);
+                                    if self.check_intersection_cone_sphere(signal, target) {
+                                        callback(target, key);
                                     }
                                 }
                             }
@@ -659,7 +654,9 @@ impl SignalField {
         level_counts[level] += 1;
 
         // 2. Insert into Grid
-        grid.entry(tile_key).or_default().push((key, signal.emit_mask));
+        grid.entry(tile_key)
+            .or_default()
+            .push((key, signal.emit_mask));
     }
 
     // fn check_collision_hollow_sphere(&self, pos: Vec2, sig: &Signal) -> bool {
@@ -704,41 +701,55 @@ impl SignalField {
         true
     }
 
-    fn check_intersection_cone(
-        &self,
-        origin: Vec2,      // Cone Origin (The Camera/Eye)
-        direction: Vec2,   // Cone Direction (Where it looks)
-        angle_cos: f32,    // Cone Angle (Field of View)
-        outer_radius: f32, // Cone Length (Max View Distance)
-        sig: &Signal,      // The Object (The Wall/Target)
-    ) -> bool {
-        // 1. Vector Calculation: FROM Origin TO Signal
-        let to_target = sig.origin - origin;
+    // WARN: math not asserted, but it works as expected
+    fn check_intersection_cone_sphere(&self, viewer_cone: &Signal, target_sphere: &Signal) -> bool {
+        // 1. Vector Setup
+        let to_target = target_sphere.origin - viewer_cone.origin;
         let dist_sq = to_target.length_squared();
-        let target_radius = sig.outer_radius;
+        let target_radius = target_sphere.outer_radius;
 
-        // 2. Distance Check (Cone Length + Target Radius)
-        let max_dist = outer_radius + target_radius;
+        // 2. Max Range Check
+        let max_dist = viewer_cone.outer_radius + target_radius;
         if dist_sq > max_dist * max_dist {
             return false;
         }
 
-        // 3. Early Out: Inside the target?
-        // If the cone origin (camera) is physically inside the wall, it hits.
-        if dist_sq < target_radius * target_radius {
+        // 3. Min Range Check (Blind Spot Fix)
+        // If the viewer has an inner_radius (blind spot), we check if the
+        // target is fully inside it.
+        let effective_min = (viewer_cone.inner_radius - target_radius).max(0.0);
+        if dist_sq < effective_min * effective_min {
+            return false;
+        }
+
+        // 4. "Inside" Check
+        // If we are physically inside the target volume, we see it.
+        if dist_sq <= (target_radius * target_radius) + 0.00001 {
             return true;
         }
 
-        // 4. Angle Check
-        if angle_cos > -1.0 {
+        // 5. Angle Check (Exact Math)
+        if viewer_cone.angle_cos > -1.0 {
             let dist = dist_sq.sqrt();
-            let dir_to_target = to_target / dist; // Normalize
+            if dist < 0.0001 {
+                return true;
+            } // Singularity guard
 
-            // 5. "Fat Cone" Expansion
-            let angle_expansion = target_radius / dist;
-            let expanded_threshold = angle_cos - angle_expansion;
+            let dir_to_target = to_target / dist;
 
-            if direction.dot(dir_to_target) < expanded_threshold {
+            // A. Viewer Cone (Alpha)
+            let sin_alpha = (1.0 - viewer_cone.angle_cos * viewer_cone.angle_cos).max(0.0).sqrt();
+
+            // B. Target Width (Beta)
+            let ratio = (target_radius / dist).min(1.0);
+            let sin_beta = ratio;
+            let cos_beta = (1.0 - ratio * ratio).max(0.0).sqrt();
+
+            // C. Threshold: cos(alpha + beta)
+            // formula: cos(a)cos(b) - sin(a)sin(b)
+            let expanded_threshold = (viewer_cone.angle_cos * cos_beta) - (sin_alpha * sin_beta);
+
+            if viewer_cone.direction.dot(dir_to_target) < expanded_threshold {
                 return false;
             }
         }

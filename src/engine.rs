@@ -32,10 +32,10 @@ pub struct DebugInfo {
 }
 
 #[derive(Copy, Clone)]
-pub enum InspectionState {
+pub enum EngineCommand {
     UpdateTransform(Entity, Transform),
     UpdateSignal(Entity, SignalEmitter),
-    Idle,
+    SelectEntity(Entity),
 }
 
 #[derive(Debug)]
@@ -46,14 +46,10 @@ pub struct InspectionData {
 }
 
 pub struct FrameData {
-    // render
     pub agents: Vec<AgentRenderData>, // The "Points" for the GPU
-    // pub signals: Vec<Signal>,    // Keep these for UI/Overlay logic
-    // gui
     pub debug_info: DebugInfo,
     //
     //////
-    //
     // 1. THE VIEW (Read-Only for GUI, Write-Only for Engine)
     // The Engine guarantees this is always populated with the latest reality.
     // The GUI just reads this to draw the window.
@@ -61,7 +57,7 @@ pub struct FrameData {
     // 2. THE COMMAND (Write-Only for GUI, Read-Only for Engine)
     // The GUI only touches this if the user CHANGED something.
     // The Engine checks this to see if it needs to update the ECS.
-    pub inspection_command: InspectionState,
+    pub inspection_entities: Vec<(Entity, Label)>,
 }
 
 //////////////////
@@ -197,6 +193,10 @@ impl Engine {
                 }
             }
         }
+        frame.inspection_entities.clear();
+        for (entity, label) in self.world.query::<&Label>().iter() {
+            frame.inspection_entities.push((entity, label.clone()));
+        }
     }
 
     ///////////////////
@@ -209,7 +209,7 @@ impl Engine {
     ) {
         let mut rng = rand::rng();
 
-        for _ in 0..3000 {
+        for _ in 0..10000 {
             // Random Data
             let rand_pos_x = rng.random_range(0.0..width);
             let rand_pos_y = rng.random_range(0.0..height);
@@ -222,7 +222,7 @@ impl Engine {
 
             let pos = Vec2::new(rand_pos_x, rand_pos_y);
             let radius = 3.0;
-            let scale = 1.0;
+            let scale = 2.0;
 
             // 1. RESERVE ID (Critical for correct linking)
             let id = world.reserve_entity();
@@ -392,14 +392,14 @@ impl Engine {
         let layer_mask = SignalMask::default();
         signal_mask.set(BIT_BOUNDING_VOLUME, true);
 
-        let outer_rad = player_scale;
+        let outer_rad = 1.0;
         let inner_rad = 0.0;
         let cone_angle = TAU;
         // let cone_angle = 2.094; // 120 degrees
 
         let player_emitter = SignalEmitter {
-            radius_max: 1.0, // Base size
-            radius_min: 0.1, // Normalized inner (14/15)
+            radius_max: outer_rad, // Base size
+            radius_min: inner_rad, // Normalized inner (14/15)
             cone_angle: cone_angle,
             emit_mask: signal_mask,
             sense_mask: signal_mask,
@@ -421,6 +421,9 @@ impl Engine {
         world.spawn_at(
             player_id,
             (
+                Label {
+                    name: String::from("Player"),
+                },
                 Transform {
                     position: player_pos,
                     scale: player_scale,
@@ -445,7 +448,7 @@ impl Engine {
         // =========================================================
         let player_vision_id = world.reserve_entity();
         let scanner_range = 1.0;
-        let scale = 20.0;
+        let scale = 200.0;
         let cone_angle = TAU / 4.0;
 
         // Component
@@ -473,6 +476,9 @@ impl Engine {
         world.spawn_at(
             player_vision_id,
             (
+                Label {
+                    name: String::from("Vision"),
+                },
                 Transform {
                     position: player_pos,
                     scale: scale,
@@ -495,10 +501,9 @@ impl Engine {
         (player_id, player_vision_id)
     }
 
-    pub fn handle(&mut self, command: InspectionState) {
-        type State = InspectionState;
+    pub fn handle(&mut self, command: EngineCommand) {
         match command {
-            State::UpdateTransform(entity, new_transform) => {
+            EngineCommand::UpdateTransform(entity, new_transform) => {
                 // 1. Update the Transform (Cache)
                 if let Ok(mut xform) = self.world.get::<&mut Transform>(entity) {
                     *xform = new_transform;
@@ -529,7 +534,7 @@ impl Engine {
                     }
                 }
             }
-            State::UpdateSignal(entity, signal) => {
+            EngineCommand::UpdateSignal(entity, signal) => {
                 if let Ok(mut query) = self
                     .world
                     .query_one::<(&Transform, &mut SignalEmitter)>(entity)
@@ -542,7 +547,9 @@ impl Engine {
                     }
                 }
             }
-            InspectionState::Idle => {}
+            EngineCommand::SelectEntity(entity) => {
+                self.selected_entity = entity;
+            }
         }
     }
 }

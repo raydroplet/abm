@@ -1,44 +1,76 @@
 // gui.rs
 
 use crate::components::Transform;
-use crate::engine::{DebugInfo, Engine, FrameData, InspectionData, InspectionState};
-use crate::wave::{LevelMask, Signal};
+use crate::engine::{DebugInfo, Engine, EngineCommand, FrameData, InspectionData};
+use crate::wave::LevelMask;
 
 pub use crossbeam_channel as crossbeam;
 pub use eframe::egui;
 use hecs::Entity;
 use std::thread;
 
+pub enum ProducerCommand {
+    PLAY,
+    PAUSE,
+}
+
+pub enum Command {
+    Producer(ProducerCommand),
+    Engine(EngineCommand),
+}
+
+impl From<EngineCommand> for Command {
+    fn from(cmd: EngineCommand) -> Self {
+        Command::Engine(cmd)
+    }
+}
+
 pub struct Producer {
     returner: crossbeam::Sender<FrameData>,
     receiver: crossbeam::Receiver<FrameData>,
+    command_receiver: crossbeam::Receiver<Command>,
+    //
+    to_tick: bool,
 }
 
 impl Producer {
     pub fn new(
         engine_receiver: crossbeam::Receiver<FrameData>,
         engine_returner: crossbeam::Sender<FrameData>,
+        command_receiver: crossbeam::Receiver<Command>,
     ) -> Self {
         Self {
             returner: engine_returner,
             receiver: engine_receiver,
+            command_receiver: command_receiver,
+            to_tick: true,
         }
     }
 
     // Takes ownership of Engine and runs it in a background thread
-    pub fn run_thread(self, mut engine: Engine) {
+    pub fn run_thread(mut self, mut engine: Engine) {
         thread::spawn(move || {
             loop {
-                engine.tick();
+                match self.command_receiver.try_recv() {
+                    Ok(command) => match command {
+                        Command::Producer(producer_command) => {
+                            self.handle(producer_command);
+                        }
+                        Command::Engine(engine_command) => {
+                            engine.handle(engine_command);
+                        }
+                    },
+                    Err(_) => {}
+                }
+
+                if self.to_tick {
+                    engine.tick();
+                }
 
                 match self.receiver.try_recv() {
                     Ok(mut frame) => {
                         // A buffer is available! We can render.
-                        engine.handle(frame.inspection_command);
                         engine.render(&mut frame);
-
-                        // resets the command
-                        frame.inspection_command = InspectionState::Idle;
 
                         // Send it to the UI
                         if self.returner.send(frame).is_err() {
@@ -58,6 +90,17 @@ impl Producer {
             }
         });
     }
+
+    fn handle(&mut self, command: ProducerCommand) {
+        match command {
+            ProducerCommand::PLAY => {
+                self.to_tick = true;
+            }
+            ProducerCommand::PAUSE => {
+                self.to_tick = false;
+            }
+        }
+    }
 }
 
 // Small wrapper for the eframe::App trait
@@ -68,6 +111,7 @@ impl Producer {
 pub struct Presenter {
     receiver: crossbeam::Receiver<FrameData>,
     returner: crossbeam::Sender<FrameData>,
+    command_sender: crossbeam::Sender<Command>,
     //
     // UPS (Physics) Smoothing
     last_tick_count: u64,   // Snapshot of total ticks 0.5s ago
@@ -83,10 +127,12 @@ impl Presenter {
     pub fn new(
         frame_receiver: crossbeam::Receiver<FrameData>,
         frame_returner: crossbeam::Sender<FrameData>,
+        command_sender: crossbeam::Sender<Command>,
     ) -> Self {
         Self {
             receiver: frame_receiver,
             returner: frame_returner,
+            command_sender: command_sender,
             //
             last_tick_count: 0,
             last_measure_time: 0.0,
@@ -103,12 +149,12 @@ impl Presenter {
 
         for _ in 0..2 {
             let _ = self.returner.send(FrameData {
-                inspection_command: InspectionState::Idle,
                 inspection_view: InspectionData {
                     entity: Entity::DANGLING,
                     xform: Transform::default(),
                     emitters: Vec::new(),
                 },
+                inspection_entities: Vec::new(),
                 agents: Vec::new(),
                 // signals: Vec::new(),
                 debug_info: DebugInfo::default(),
@@ -148,6 +194,60 @@ impl Presenter {
     //         _ => panic!(),
     //     }
     // }
+
+    fn render_hierarchy_window(
+        ctx: &egui::Context,
+        frame: &mut FrameData,
+        command_channel: &mut crossbeam::Sender<Command>,
+    ) {
+        egui::Window::new("Scene Hierarchy")
+            .pivot(egui::Align2::RIGHT_BOTTOM)
+            .default_width(200.0)
+            .default_height(400.0)
+            .vscroll(false) // We handle scrolling manually with show_rows
+            .show(ctx, |ui| {
+                // 1. Search / Filter (Optional, adds polish)
+                ui.horizontal(|ui| {
+                    // If you want a search bar, you'd store the string in 'Presenter' struct
+                    // and pass it here. For now, just a placeholder header.
+                    ui.label(format!("Entities: {}", frame.inspection_entities.len()));
+                });
+                ui.separator();
+
+                // 2. Virtualized List
+                // We use show_rows to only render what is visible on screen.
+                let row_height = 18.0; // Height of one label
+                let total_rows = frame.inspection_entities.len();
+
+                egui::ScrollArea::vertical().show_rows(
+                    ui,
+                    row_height,
+                    total_rows,
+                    |ui, row_range| {
+                        // 'row_range' tells us which indices are currently visible (e.g., 10..40)
+                        for i in row_range {
+                            if let Some((entity, label)) = frame.inspection_entities.get(i) {
+                                // 3. Selection Logic
+                                // Check if this row is the currently selected one
+                                let is_selected = frame.inspection_view.entity == *entity;
+
+                                // We assume 'Label' is your component wrapper Label(String).
+                                // If it is just a String, use 'label' directly.
+                                let text = &label.name;
+
+                                // 4. Draw the Button
+                                if ui.selectable_label(is_selected, text).clicked() {
+                                    // 5. Send Command
+                                    // We write to the command buffer. The engine will pick this up
+                                    // next tick and populate 'inspection_view' with the new data.
+                                    command_channel.send(EngineCommand::SelectEntity(*entity).into());
+                                }
+                            }
+                        }
+                    },
+                );
+            });
+    }
 
     fn render_debug_window(ctx: &egui::Context, frame: &FrameData, display_ups: u64) {
         let padding = 5.0;
@@ -221,7 +321,7 @@ impl Presenter {
     fn render_inspection_window(
         ctx: &egui::Context,
         view: &mut InspectionData,
-        mut command: &mut InspectionState,
+        command_channel: &mut crossbeam::Sender<Command>,
     ) {
         let padding = 5.0;
         egui::Window::new("Inspector")
@@ -240,15 +340,15 @@ impl Presenter {
                 ui.label(egui::RichText::new(format!("Entity #{:?}", view.entity)).monospace());
                 ui.separator();
 
-                Self::render_component_transform(ui, view, &mut command);
-                Self::render_component_emitter(ui, view, &mut command);
+                Self::render_component_transform(ui, view, command_channel);
+                Self::render_component_emitter(ui, view, command_channel);
             });
     }
 
     fn render_component_transform(
         ui: &mut egui::Ui,
         view: &mut InspectionData,
-        command: &mut InspectionState,
+        command_channel: &mut crossbeam::Sender<Command>,
     ) {
         let transform = &mut view.xform;
         egui::CollapsingHeader::new("Transform")
@@ -266,15 +366,17 @@ impl Presenter {
                             let response =
                                 ui.add(egui::DragValue::new(&mut transform.position.x).speed(1.0));
                             if response.changed() {
-                                *command =
-                                    InspectionState::UpdateTransform(view.entity, *transform);
+                                command_channel.send(
+                                    EngineCommand::UpdateTransform(view.entity, *transform).into(),
+                                );
                             }
                             ui.label("Y");
                             let response =
                                 ui.add(egui::DragValue::new(&mut transform.position.y).speed(1.0));
                             if response.changed() {
-                                *command =
-                                    InspectionState::UpdateTransform(view.entity, *transform);
+                                command_channel.send(
+                                    EngineCommand::UpdateTransform(view.entity, *transform).into(),
+                                );
                             }
                         });
                         ui.end_row();
@@ -286,15 +388,17 @@ impl Presenter {
                             let response =
                                 ui.add(egui::DragValue::new(&mut transform.scale).speed(1.0));
                             if response.changed() {
-                                *command =
-                                    InspectionState::UpdateTransform(view.entity, *transform);
+                                command_channel.send(
+                                    EngineCommand::UpdateTransform(view.entity, *transform).into(),
+                                );
                             }
                             ui.label("Y");
                             let response =
                                 ui.add(egui::DragValue::new(&mut transform.scale).speed(1.0));
                             if response.changed() {
-                                *command =
-                                    InspectionState::UpdateTransform(view.entity, *transform);
+                                command_channel.send(
+                                    EngineCommand::UpdateTransform(view.entity, *transform).into(),
+                                );
                             }
                         });
                         ui.end_row();
@@ -307,8 +411,9 @@ impl Presenter {
                             let response = ui.add(egui::DragValue::new(&mut rot_deg).speed(1.0));
                             if response.changed() {
                                 transform.rotation = rot_deg.to_radians();
-                                *command =
-                                    InspectionState::UpdateTransform(view.entity, *transform);
+                                command_channel.send(
+                                    EngineCommand::UpdateTransform(view.entity, *transform).into(),
+                                );
                             }
                         });
                         ui.end_row();
@@ -320,7 +425,7 @@ impl Presenter {
     fn render_component_emitter(
         ui: &mut egui::Ui,
         view: &mut InspectionData,
-        command: &mut InspectionState,
+        command_channel: &mut crossbeam::Sender<Command>,
     ) {
         for emitter in &mut view.emitters {
             egui::CollapsingHeader::new("Signal")
@@ -334,14 +439,17 @@ impl Presenter {
                                 ui.label("Outer Radius");
                                 let mut radius_max = emitter.radius_max;
                                 if ui
-                                    .add(egui::DragValue::new(&mut radius_max)
-                                        .range(emitter.radius_min..=f32::MAX)
-                                        .speed(0.01)
+                                    .add(
+                                        egui::DragValue::new(&mut radius_max)
+                                            .range(emitter.radius_min..=f32::MAX)
+                                            .speed(0.01),
                                     )
                                     .changed()
                                 {
                                     emitter.radius_max = radius_max;
-                                    *command = InspectionState::UpdateSignal(view.entity, *emitter);
+                                    command_channel.send(
+                                        EngineCommand::UpdateSignal(view.entity, *emitter).into(),
+                                    );
                                 }
                                 ui.end_row();
 
@@ -357,7 +465,9 @@ impl Presenter {
                                     .changed()
                                 {
                                     emitter.radius_min = radius_min;
-                                    *command = InspectionState::UpdateSignal(view.entity, *emitter);
+                                    command_channel.send(
+                                        EngineCommand::UpdateSignal(view.entity, *emitter).into(),
+                                    );
                                 }
                                 ui.end_row();
 
@@ -368,7 +478,9 @@ impl Presenter {
                                     .changed()
                                 {
                                     emitter.cone_angle = degrees.to_radians();
-                                    *command = InspectionState::UpdateSignal(view.entity, *emitter);
+                                    command_channel.send(
+                                        EngineCommand::UpdateSignal(view.entity, *emitter).into(),
+                                    );
                                 }
                                 ui.end_row();
                             });
@@ -646,13 +758,14 @@ impl eframe::App for Presenter {
                     let painter = ui.painter();
                     // Self::render_waves(painter, frame);
                     Self::render_agents(painter, frame);
+                    Self::render_hierarchy_window(ctx, frame, &mut self.command_sender); // WARN: implement-me
                     Self::render_debug_window(ctx, frame, self.display_ups);
 
                     // This is where the frame data is modified
                     Self::render_inspection_window(
                         ctx,
                         &mut frame.inspection_view,
-                        &mut frame.inspection_command,
+                        &mut self.command_sender,
                     );
                 });
 
