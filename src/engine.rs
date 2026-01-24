@@ -73,7 +73,6 @@ pub struct Engine {
     signal_field: SignalField,
     //
     camera_dimension: Vec2,
-    camera_position: Vec2,
     //
     selected_entity: Entity,
 }
@@ -96,7 +95,6 @@ impl Engine {
             last_tick_time_ms: 0.0,
             signal_field, // Store the layer
             camera_dimension: Vec2::new(width, height),
-            camera_position: Vec2::new(0.0, 0.0),
             selected_entity: player_vision_id,
         }
     }

@@ -1,7 +1,7 @@
 // wave.rs
 
 use bitvec::prelude::*;
-use glam::Vec2;
+use glam::{IVec2, Vec2};
 use rustc_hash::FxHashMap;
 // use slotmap::{SlotMap, new_key_type};
 use smallvec::SmallVec;
@@ -407,16 +407,12 @@ impl SignalField {
         let max_aabb = signal.origin + Vec2::splat(signal.outer_radius);
 
         for level in scanning.iter_ones() {
-            let cell_size = (1 << level) as f32;
+            // let cell_size = SignalField::get_level_size(level); // this likely can be removed
+            // from here
+            let (min_range, max_range) = Self::get_tile_range(min_aabb, max_aabb, level);
 
-            // Standard Grid Iteration (Same as scan_aabb)
-            let min_gx = (min_aabb.x / cell_size).floor() as i32 - 1;
-            let max_gx = (max_aabb.x / cell_size).floor() as i32 + 1;
-            let min_gy = (min_aabb.y / cell_size).floor() as i32 - 1;
-            let max_gy = (max_aabb.y / cell_size).floor() as i32 + 1;
-
-            for gx in min_gx..=max_gx {
-                for gy in min_gy..=max_gy {
+            for gx in min_range.x..=max_range.x {
+                for gy in min_range.y..=max_range.y {
                     if let Some(bucket) = self.grid.get(&TileKey {
                         level: level as u8,
                         x: gx,
@@ -909,18 +905,40 @@ impl SignalField {
         }
     }
 
-    // this can be severely optimized, but it will stay like that until needed
-    fn get_level(radius: f32) -> usize {
-        if radius < 1.0 {
-            return 0;
-        }
-        // Use ceil to ensure cell_size > radius
-        let shift = radius.log2().ceil() as usize;
-        if shift > 63 { 63 } else { shift }
+    ////////////////////////////////////////////////////////////////////////////////////////
+
+    /// Returns the (min, max) grid coordinates as IVec2s for the given AABB and level.
+    /// Includes the 1-tile padding for broad-phase safety.
+    pub fn get_tile_range(min_aabb: Vec2, max_aabb: Vec2, level: usize) -> (IVec2, IVec2) {
+        let cell_size = Self::get_level_size(level);
+
+        let min_g = (min_aabb / cell_size).floor().as_ivec2() - IVec2::ONE;
+        let max_g = (max_aabb / cell_size).floor().as_ivec2() + IVec2::ONE;
+
+        (min_g, max_g)
     }
 
-    ////////
-    /// ---
+
+    /// Returns the level of the smallest tile that can fit
+    /// 8 circles of this radius arranged in a 2x2 grid.
+    pub fn get_level(radius: f32) -> usize {
+        // The required tile diameter is 4 times the radius.
+        let required_width = radius * 4.0;
+
+        if required_width <= 1.0 {
+            return 0;
+        }
+
+        // Smallest power of two that fits the required width
+        required_width.log2().ceil() as usize
+    }
+
+    // Returns the tile square side dimension
+    pub fn get_level_size(level: usize) -> f32 {
+        (2.0_f32).powi(level as i32)
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////////////
 
     pub fn get_level_mask(&self) -> LevelMask {
         self.active_levels

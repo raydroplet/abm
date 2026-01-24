@@ -2,10 +2,11 @@
 
 use crate::components::Transform;
 use crate::engine::{DebugInfo, Engine, EngineCommand, FrameData, InspectionData};
-use crate::wave::LevelMask;
+use crate::wave::{LevelMask, SignalField};
 
 pub use crossbeam_channel as crossbeam;
 pub use eframe::egui;
+use glam::{Vec2};
 use hecs::Entity;
 use std::thread;
 
@@ -32,7 +33,7 @@ pub struct Producer {
     command_receiver: crossbeam::Receiver<Command>,
     //
     to_tick: bool,
-single_step: bool,
+    single_step: bool,
 }
 
 impl Producer {
@@ -273,41 +274,6 @@ impl Presenter {
                     }
                 });
                 ui.separator();
-                ///////////////////////
-                // 1. Collect only the indices that are actually active in the grid
-                let active_indices: Vec<usize> =
-                    frame.debug_info.active_levels_mask.iter_ones().collect();
-
-                if !active_indices.is_empty() {
-                    // 2. We need to find the "index of the current level" in our active list
-                    // to keep the slider position consistent.
-                    let mut current_selection_idx = active_indices
-                        .iter()
-                        .position(|&idx| idx == *selected_level)
-                        .unwrap_or(0);
-
-                    // 3. Slider over the AVAILABLE indices only
-                    let max_idx = active_indices.len() - 1;
-                    let res = ui.add(
-                        egui::Slider::new(&mut current_selection_idx, 0..=max_idx)
-                            .custom_formatter(|idx, _| {
-                                // Show the actual Level value (e.g. "Level 5") rather than the list index
-                                format!("Level {}", active_indices[idx as usize])
-                            }),
-                    );
-
-                    // 4. Update the actual selected_level if the slider moved
-                    if res.changed() {
-                        *selected_level = active_indices[current_selection_idx];
-                    }
-
-                    // Display the pixel size for the currently active choice
-                    ui.label(format!("Cell Size: {}px", 1 << *selected_level));
-                } else {
-                    ui.colored_label(egui::Color32::GRAY, "No active spatial levels");
-                }
-                ///////////////////////
-                ui.separator();
 
                 // 1. Performance Metrics
                 let fps = 1.0 / ctx.input(|i| i.stable_dt);
@@ -367,6 +333,42 @@ impl Presenter {
                 ui.label(format!("Visible Waves:  {}", wave_count));
 
                 ui.label(format!("Ticks Elapsed:  {}", debug_info.tick_counter));
+
+                ///////////////////////
+                ui.separator();
+                // 1. Collect only the indices that are actually active in the grid
+                let active_indices: Vec<usize> =
+                    frame.debug_info.active_levels_mask.iter_ones().collect();
+
+                if !active_indices.is_empty() {
+                    // 2. We need to find the "index of the current level" in our active list
+                    // to keep the slider position consistent.
+                    let mut current_selection_idx = active_indices
+                        .iter()
+                        .position(|&idx| idx == *selected_level)
+                        .unwrap_or(0);
+
+                    // 3. Slider over the AVAILABLE indices only
+                    let max_idx = active_indices.len() - 1;
+                    let res = ui.add(
+                        egui::Slider::new(&mut current_selection_idx, 0..=max_idx)
+                            .custom_formatter(|idx, _| {
+                                // Show the actual Level value (e.g. "Level 5") rather than the list index
+                                format!("Level {}", active_indices[idx as usize])
+                            }),
+                    );
+
+                    // 4. Update the actual selected_level if the slider moved
+                    if res.changed() {
+                        *selected_level = active_indices[current_selection_idx];
+                    }
+
+                    // Display the pixel size for the currently active choice
+                    ui.label(format!("Cell Size: {}", 1 << *selected_level));
+                } else {
+                    ui.colored_label(egui::Color32::GRAY, "No active spatial levels");
+                }
+                ///////////////////////
             });
     }
 
@@ -751,19 +753,56 @@ impl Presenter {
     fn render_grid(painter: &egui::Painter, frame: &FrameData, selected_level: usize) {
         // 1. Check if the level is actually active
         let mask = frame.debug_info.active_levels_mask;
-        if !mask[selected_level] {
+        if selected_level >= mask.len() || !mask[selected_level] {
             return;
         }
 
         // 2. Derive geometry
-        let cell_size = (1u64 << selected_level) as f32;
+        let cell_size = SignalField::get_level_size(selected_level);
         let screen_rect = painter.clip_rect();
 
-        // Choose a "Blue Hour" indigo: faint, but visible
+        // --- AABB TILE PAINTING ---
+        // Only paint if there is a selection and its level matches the wireframe level
+        if !frame.inspection_view.emitters.is_empty() {
+            let view = &frame.inspection_view;
+            let emitter = &view.emitters[0];
+
+            // Calculate the world-space radius and the level it belongs to
+            let world_radius = emitter.radius_max * view.xform.scale;
+            let signal_level = SignalField::get_level(world_radius);
+
+            if signal_level == selected_level {
+                let world_pos = view.xform.position;
+                let min_aabb = world_pos - Vec2::splat(world_radius);
+                let max_aabb = world_pos + Vec2::splat(world_radius);
+
+                // Get the grid bounds for the broad-phase scan
+                let (min_g, max_g) =
+                    SignalField::get_tile_range(min_aabb, max_aabb, selected_level);
+
+                // Use a faint "Blue Hour" indigo for the fill, slightly more opaque than the lines
+                let highlight_color = egui::Color32::from_rgba_unmultiplied(63, 81, 181, 25);
+
+                for gx in min_g.x..=max_g.x {
+                    for gy in min_g.y..=max_g.y {
+                        let tile_min = egui::pos2(gx as f32 * cell_size, gy as f32 * cell_size);
+                        let tile_max =
+                            egui::pos2((gx + 1) as f32 * cell_size, (gy + 1) as f32 * cell_size);
+                        painter.rect_filled(
+                            egui::Rect::from_min_max(tile_min, tile_max),
+                            0.0,
+                            highlight_color,
+                        );
+                    }
+                }
+            }
+        }
+
+        // --- WIREFRAME RENDERING ---
         let grid_color = egui::Color32::from_rgba_unmultiplied(63, 81, 181, 40);
         let stroke = egui::Stroke::new(1.0, grid_color);
 
-        // 3. Draw Vertical Lines
+        // Vertical Lines
         let mut x = (screen_rect.min.x / cell_size).floor() * cell_size;
         while x <= screen_rect.max.x {
             painter.line_segment(
@@ -776,7 +815,7 @@ impl Presenter {
             x += cell_size;
         }
 
-        // 4. Draw Horizontal Lines
+        // Horizontal Lines
         let mut y = (screen_rect.min.y / cell_size).floor() * cell_size;
         while y <= screen_rect.max.y {
             painter.line_segment(

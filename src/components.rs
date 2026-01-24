@@ -94,7 +94,7 @@ pub struct Label {
     pub name: String,
 }
 
-// pub struct DebugCamera {
-//     level_mask: LevelMask,
-//     signal_mask: SignalMask,
-// }
+pub struct Camera {
+    level_mask: LevelMask,
+    signal_mask: SignalMask,
+}

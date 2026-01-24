@@ -18,7 +18,7 @@ zorder = "0.2.2"
 
 [profile.dev]
 # opt-level = 1 # Basic optimizations (huge speedup for loops)
-opt-level = 0
+opt-level = 1
 
 # Optional: Optimize dependencies (like hecs/egui) fully, but keep your code debuggable
 [profile.dev.package."*"]
