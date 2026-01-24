@@ -307,8 +307,8 @@ impl SignalField {
             let max_grid_y = ((max[1] / cell_size).floor() as i32) + 1;
 
             // 2. Iterate the range (The Volume Loop)
-            for gx in min_grid_x..=max_grid_x {
-                for gy in min_grid_y..=max_grid_y {
+            for gx in min_grid_x..max_grid_x {
+                for gy in min_grid_y..max_grid_y {
                     if let Some(bucket) = self.grid.get(&TileKey {
                         level: level as u8,
                         x: gx,
@@ -360,8 +360,8 @@ impl SignalField {
     //         let min_gy = (min_aabb.y / cell_size).floor() as i32 - 1;
     //         let max_gy = (max_aabb.y / cell_size).floor() as i32 + 1;
     //
-    //         for gx in min_gx..=max_gx {
-    //             for gy in min_gy..=max_gy {
+    //         for gx in min_gx..max_gx {
+    //             for gy in min_gy..max_gy {
     //                 if let Some(bucket) = self.grid.get(&TileKey {
     //                     level: level as u8,
     //                     x: gx,
@@ -411,8 +411,8 @@ impl SignalField {
             // from here
             let (min_range, max_range) = Self::get_tile_range(min_aabb, max_aabb, level);
 
-            for gx in min_range.x..=max_range.x {
-                for gy in min_range.y..=max_range.y {
+            for gx in min_range.x..max_range.x {
+                for gy in min_range.y..max_range.y {
                     if let Some(bucket) = self.grid.get(&TileKey {
                         level: level as u8,
                         x: gx,
@@ -476,8 +476,8 @@ impl SignalField {
             let min_gy = ((min_scan.y / cell_size).floor() as i32) - 1;
             let max_gy = ((max_scan.y / cell_size).floor() as i32) + 1;
 
-            for gx in min_gx..=max_gx {
-                for gy in min_gy..=max_gy {
+            for gx in min_gx..max_gx {
+                for gy in min_gy..max_gy {
                     let key = TileKey {
                         level: level as u8,
                         x: gx,
@@ -912,12 +912,13 @@ impl SignalField {
     pub fn get_tile_range(min_aabb: Vec2, max_aabb: Vec2, level: usize) -> (IVec2, IVec2) {
         let cell_size = Self::get_level_size(level);
 
+        // Use floor to ensure consistent behavior in negative coordinates
         let min_g = (min_aabb / cell_size).floor().as_ivec2() - IVec2::ONE;
-        let max_g = (max_aabb / cell_size).floor().as_ivec2() + IVec2::ONE;
+        let max_g = (max_aabb / cell_size).ceil().as_ivec2() + IVec2::ONE;
 
+        // WARN: when looping do not use min..=max, use min..max instead
         (min_g, max_g)
     }
-
 
     /// Returns the level of the smallest tile that can fit
     /// 8 circles of this radius arranged in a 2x2 grid.

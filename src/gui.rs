@@ -6,7 +6,7 @@ use crate::wave::{LevelMask, SignalField};
 
 pub use crossbeam_channel as crossbeam;
 pub use eframe::egui;
-use glam::{Vec2};
+use glam::Vec2;
 use hecs::Entity;
 use std::thread;
 
@@ -762,38 +762,35 @@ impl Presenter {
         let screen_rect = painter.clip_rect();
 
         // --- AABB TILE PAINTING ---
-        // Only paint if there is a selection and its level matches the wireframe level
+        // Now paints for any 'selected_level', visualizing the search area at that specific scale
         if !frame.inspection_view.emitters.is_empty() {
             let view = &frame.inspection_view;
             let emitter = &view.emitters[0];
 
-            // Calculate the world-space radius and the level it belongs to
+            // World-space radius and position of the selection
             let world_radius = emitter.radius_max * view.xform.scale;
-            let signal_level = SignalField::get_level(world_radius);
+            let world_pos = view.xform.position;
 
-            if signal_level == selected_level {
-                let world_pos = view.xform.position;
-                let min_aabb = world_pos - Vec2::splat(world_radius);
-                let max_aabb = world_pos + Vec2::splat(world_radius);
+            let min_aabb = world_pos - Vec2::splat(world_radius);
+            let max_aabb = world_pos + Vec2::splat(world_radius);
 
-                // Get the grid bounds for the broad-phase scan
-                let (min_g, max_g) =
-                    SignalField::get_tile_range(min_aabb, max_aabb, selected_level);
+            // Get the grid bounds using the current wireframe's level
+            let (min_g, max_g) = SignalField::get_tile_range(min_aabb, max_aabb, selected_level);
 
-                // Use a faint "Blue Hour" indigo for the fill, slightly more opaque than the lines
-                let highlight_color = egui::Color32::from_rgba_unmultiplied(63, 81, 181, 25);
+            // Indigo fill (slightly more transparent than the lines)
+            let highlight_color = egui::Color32::from_rgba_unmultiplied(63, 81, 181, 25);
 
-                for gx in min_g.x..=max_g.x {
-                    for gy in min_g.y..=max_g.y {
-                        let tile_min = egui::pos2(gx as f32 * cell_size, gy as f32 * cell_size);
-                        let tile_max =
-                            egui::pos2((gx + 1) as f32 * cell_size, (gy + 1) as f32 * cell_size);
-                        painter.rect_filled(
-                            egui::Rect::from_min_max(tile_min, tile_max),
-                            0.0,
-                            highlight_color,
-                        );
-                    }
+            for gx in min_g.x..max_g.x {
+                for gy in min_g.y..max_g.y {
+                    let tile_min = egui::pos2(gx as f32 * cell_size, gy as f32 * cell_size);
+                    let tile_max =
+                        egui::pos2((gx + 1) as f32 * cell_size, (gy + 1) as f32 * cell_size);
+
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(tile_min, tile_max),
+                        0.0,
+                        highlight_color,
+                    );
                 }
             }
         }
