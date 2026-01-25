@@ -33,6 +33,8 @@ pub struct DebugInfo {
 
 #[derive(Copy, Clone)]
 pub enum EngineCommand {
+    UpdateViewport(Vec2),
+    //
     UpdateTransform(Entity, Transform),
     UpdateSignal(Entity, SignalEmitter),
     SelectEntity(Entity),
@@ -50,6 +52,7 @@ pub struct FrameData {
     pub debug_info: DebugInfo,
     //
     pub camera_xform: Transform,
+    pub internal_res: Vec2,
     //
     // (Read-Only for GUI, Write-Only for Engine)
     // The Engine guarantees this is always populated with the latest reality.
@@ -73,7 +76,7 @@ pub struct Engine {
     //
     selected_entity: Entity,
     camera_entity: Entity,
-    screen_dimension: Vec2,
+    viewport_size: Vec2,
 }
 
 impl Engine {
@@ -96,7 +99,7 @@ impl Engine {
             signal_field, // Store the layer
             camera_entity: camera_id,
             selected_entity: player_vision_id,
-            screen_dimension: Vec2::new(width, height),
+            viewport_size: Vec2::new(width, height),
         }
     }
 
@@ -107,72 +110,48 @@ impl Engine {
         self.last_update = start_update;
         self.time_accumulator += delta_time;
 
-        self.system_simple_physics();
+        self.system_viewport_based_physics();
         //
     }
 
     pub fn render(&self, frame: &mut FrameData) {
         let start_render = Instant::now();
 
-        // 1. Prepare for new frame
-        frame.agents.clear();
-        // frame.signals.clear();
-
-        let mut signal_mask = SignalMask::default();
-        signal_mask.set(BIT_BOUNDING_VOLUME, true);
-        // signal_mask.set(BIT_PASSIVE, true);
-
-        let mut layer_mask = SignalMask::default();
-        layer_mask.fill(true);
-
-        // let mut filter = SignalMask::<1>::default();
-        // filter.set(BIT_RENDER, true);
-
         // 1. Prepare the query for the specific entity
         let mut query = self
             .world
-            .query_one::<(&Transform, &Camera)>(self.camera_entity)
+            .query_one::<&Transform>(self.camera_entity)
             .expect("Entity does not exist");
 
         // 2. Fetch the component references from the query
-        let (xform, camera) = query.get().expect("Entity is missing Transform or Camera");
-        let screen_center = self.screen_dimension / 2.0;
-        let zoom = 1.0 / xform.scale; // Scale usually works inversely for zoom
-        //
+        let xform = query.get().expect("Entity is missing Transform or Camera");
+        frame.internal_res = self.viewport_size;
         frame.camera_xform = *xform;
 
         // 2. Spatial Query
         // We only care about agents the camera can actually see
+        let mut signal_mask = SignalMask::default();
+        let mut layer_mask = SignalMask::default();
+        signal_mask.set(BIT_BOUNDING_VOLUME, true);
+        layer_mask.fill(true);
+
+        frame.agents.clear();
+
         self.signal_field.scan_volume_rectangle(
-            xform.position - ((self.screen_dimension / 2.0) * xform.scale),
-            xform.position + ((self.screen_dimension / 2.0) * xform.scale),
+            xform.position - ((self.viewport_size / 2.0) * xform.scale),
+            xform.position + ((self.viewport_size / 2.0) * xform.scale),
             signal_mask,
             layer_mask,
             |signal, entity| {
                 if let Ok(model) = self.world.get::<&Model>(*entity) {
-                    let mut adjusted_signal = signal.clone();
-
-                    // 1. Center the world on the camera (Translation)
-                    let relative_pos = signal.origin - xform.position;
-
-                    // 2. Apply Zoom (Scaling)
-                    let zoomed_pos = relative_pos * zoom;
-
-                    // 3. Offset to screen center (Stick to center)
-                    adjusted_signal.origin = zoomed_pos + screen_center;
-
-                    // Scale Size - Replace '.radius' with whatever field controls your entity size
-                    adjusted_signal.outer_radius *= zoom;
-
                     frame.agents.push(AgentRenderData {
-                        signal: adjusted_signal,
+                        signal: *signal,
                         color: [model.r, model.g, model.b, model.a],
                         label: None,
                     });
                 }
             },
         );
-
 
         // if self
         //     .world
@@ -360,7 +339,34 @@ impl Engine {
         }
     }
 
-    fn system_simple_physics(&mut self) {
+    fn system_viewport_based_physics(&mut self) {
+        // 1. Fetch camera transform
+        let mut query = self
+            .world
+            .query_one::<&Transform>(self.camera_entity)
+            .expect("Camera missing");
+        let xform = query.get().expect("Transform missing");
+
+        // 2. Calculate the aspect ratio of the physical window
+        let aspect = self.viewport_size.x / self.viewport_size.y;
+
+        // 3. Use your internal_res variable as the baseline
+        // 'internal_res.y' is our 768.0, 1080.0, etc.
+        let visible_height = self.viewport_size.y * xform.scale;
+
+        // 4. Derive the width based on the aspect ratio
+        let visible_width = visible_height * aspect;
+
+        // 5. Calculate the bounding box for collision
+        let half_w = visible_width / 2.0;
+        let half_h = visible_height / 2.0;
+
+        let left_edge = xform.position.x - half_w;
+        let right_edge = xform.position.x + half_w;
+        let top_edge = xform.position.y - half_h;
+        let bottom_edge = xform.position.y + half_h;
+        drop(query);
+
         // SPIRAL OF DEATH PROTECTION:
         // If the game lags hard (0.25s freeze), don't try to catch up
         // by running 15 physics steps instantly. Just cap it.
@@ -372,8 +378,6 @@ impl Engine {
             self.time_accumulator = 0.25;
         }
 
-        // fixed update loop
-        // We only update physics in chunks of FIXED_DT (e.g., 0.0166s)
         while self.time_accumulator >= FIXED_DT {
             let tick_time = Instant::now();
 
@@ -396,22 +400,22 @@ impl Engine {
                     None => {
                         xform.position += vel.linear * FIXED_DT;
 
-                        // Collision Logic (Bounce off walls)
-                        if xform.position.x >= self.screen_dimension.x {
-                            vel.linear.x *= -1.0;
-                            xform.position.x = self.screen_dimension.x;
+                        // Horizontal Collision (Visible Edges)
+                        if xform.position.x >= right_edge {
+                            vel.linear.x = -vel.linear.x.abs(); // Ensure it moves Left
+                            xform.position.x = right_edge;
+                        } else if xform.position.x <= left_edge {
+                            vel.linear.x = vel.linear.x.abs(); // Ensure it moves Right
+                            xform.position.x = left_edge;
                         }
-                        if xform.position.x <= 0.0 {
-                            vel.linear.x *= -1.0;
-                            xform.position.x = 0.0;
-                        }
-                        if xform.position.y >= self.screen_dimension.y {
-                            vel.linear.y *= -1.0;
-                            xform.position.y = self.screen_dimension.y;
-                        }
-                        if xform.position.y <= 0.0 {
-                            vel.linear.y *= -1.0;
-                            xform.position.y = 0.0;
+
+                        // Vertical Collision (Visible Edges)
+                        if xform.position.y >= bottom_edge {
+                            vel.linear.y = -vel.linear.y.abs(); // Ensure it moves Up
+                            xform.position.y = bottom_edge;
+                        } else if xform.position.y <= top_edge {
+                            vel.linear.y = vel.linear.y.abs(); // Ensure it moves Down
+                            xform.position.y = top_edge;
                         }
                     }
                 }
@@ -565,6 +569,9 @@ impl Engine {
 
     pub fn handle(&mut self, command: EngineCommand) {
         match command {
+            EngineCommand::UpdateViewport(size) => {
+                self.viewport_size = size;
+            }
             EngineCommand::UpdateTransform(entity, new_transform) => {
                 // 1. Update the Transform (Cache)
                 if let Ok(mut xform) = self.world.get::<&mut Transform>(entity) {

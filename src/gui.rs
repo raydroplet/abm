@@ -130,6 +130,7 @@ pub struct Presenter {
     // local "Double Buffer"
     // It stays here so we can draw it even if the engine is busy ticking.
     current_frame: Option<FrameData>,
+    last_viewport_size: egui::Vec2, // Store the size from the previous frame
 }
 
 impl Presenter {
@@ -149,6 +150,7 @@ impl Presenter {
             selected_grid_level: 0,
             //
             current_frame: Option::default(),
+            last_viewport_size: egui::Vec2::new(0.0, 0.0),
         }
     }
 
@@ -168,6 +170,8 @@ impl Presenter {
                 agents: Vec::new(),
                 // signals: Vec::new(),
                 debug_info: DebugInfo::default(),
+                camera_xform: Transform::default(),
+                internal_res: Vec2::new(width as f32, height as f32),
             });
         }
 
@@ -439,8 +443,11 @@ impl Presenter {
                         ui.label("Scale");
                         ui.horizontal(|ui| {
                             ui.label("X");
-                            let response =
-                                ui.add(egui::DragValue::new(&mut transform.scale).speed(0.001));
+                            let response = ui.add(
+                                egui::DragValue::new(&mut transform.scale)
+                                    .speed(0.001)
+                                    .range(0.001..=f32::MAX),
+                            );
                             if response.changed() {
                                 let _ = command_channel.send(
                                     EngineCommand::UpdateTransform(view.entity, *transform).into(),
@@ -631,7 +638,11 @@ impl Presenter {
     fn render_agents(painter: &egui::Painter, frame: &FrameData) {
         let stroke_color = egui::Color32::WHITE;
         let stroke_width = 1.0;
-
+        //
+        let viewport = painter.clip_rect();
+        let camera = &frame.camera_xform;
+        let zoom = 1.0 / camera.scale; // Calculate zoom once
+        //
         for data in &frame.agents {
             let color = egui::Color32::from_rgba_unmultiplied(
                 data.color[0],
@@ -640,17 +651,23 @@ impl Presenter {
                 data.color[3],
             );
             let signal = &data.signal;
-            let origin = egui::pos2(signal.origin.x, signal.origin.y);
+
+            // 2. Project the origin
+            let origin = Self::world_to_screen(signal.origin, frame, viewport);
+
+            // 3. Scale the radii by zoom (Division by scale)
+            let radius_max = signal.outer_radius * zoom;
+            let radius_min = signal.inner_radius * zoom;
 
             // C. Calculate the Half-Angle
             let half_angle = signal.angle_cos.clamp(-1.0, 1.0).acos();
 
             // OPTIMIZATION: Full Circle
             // If ~360 degrees and NOT hollow, use hardware circle
-            if half_angle > std::f32::consts::PI - 0.01 && signal.inner_radius < 0.1 {
+            if half_angle > std::f32::consts::PI - 0.01 && radius_min < 0.1 {
                 painter.circle(
                     origin,
-                    signal.outer_radius,
+                    radius_max,
                     color,
                     egui::Stroke::new(stroke_width, stroke_color),
                 );
@@ -676,17 +693,12 @@ impl Presenter {
                 let (sin, cos) = theta.sin_cos();
 
                 // Outer Vertex
-                let outer_pos = egui::pos2(
-                    origin.x + signal.outer_radius * cos,
-                    origin.y + signal.outer_radius * sin,
-                );
+                let outer_pos =
+                    egui::pos2(origin.x + radius_max * cos, origin.y + radius_max * sin);
 
                 // Inner Vertex
-                let inner_pos = if signal.inner_radius > 0.0 {
-                    egui::pos2(
-                        origin.x + signal.inner_radius * cos,
-                        origin.y + signal.inner_radius * sin,
-                    )
+                let inner_pos = if radius_min > 0.0 {
+                    egui::pos2(origin.x + radius_min * cos, origin.y + radius_min * sin)
                 } else {
                     origin
                 };
@@ -721,15 +733,15 @@ impl Presenter {
 
             // 4. Finish Outline Path
             // Now push inner points in REVERSE to close the loop properly for the stroke
-            if signal.inner_radius > 0.0 {
+            if radius_min > 0.0 {
                 // We need to regenerate or store them. Storing is easier but we didn't store inner list.
                 // Re-calculating loop in reverse is cheap.
                 for i in (0..=steps).rev() {
                     let theta = start_angle + (i as f32 * angle_step);
                     let (sin, cos) = theta.sin_cos();
                     outline_points.push(egui::pos2(
-                        origin.x + signal.inner_radius * cos,
-                        origin.y + signal.inner_radius * sin,
+                        origin.x + radius_min * cos,
+                        origin.y + radius_min * sin,
                     ));
                 }
             } else {
@@ -757,12 +769,17 @@ impl Presenter {
             return;
         }
 
-        // 2. Derive geometry
-        let cell_size = SignalField::get_level_size(selected_level);
+        // 2. Setup Camera and Geometry
+        let camera = &frame.camera_xform;
+        let zoom = 1.0 / camera.scale;
         let screen_rect = painter.clip_rect();
 
+        // World-space size of one cell (e.g., 64.0)
+        let world_cell_size = SignalField::get_level_size(selected_level) as f32;
+        // Screen-space size (e.g., 32.0 pixels if zoomed out)
+        let screen_cell_size = world_cell_size * zoom;
+
         // --- AABB TILE PAINTING ---
-        // Now paints for any 'selected_level', visualizing the search area at that specific scale
         if !frame.inspection_view.emitters.is_empty() {
             let view = &frame.inspection_view;
             let emitter = &view.emitters[0];
@@ -771,20 +788,27 @@ impl Presenter {
             let world_radius = emitter.radius_max * view.xform.scale;
             let world_pos = view.xform.position;
 
-            let min_aabb = world_pos - Vec2::splat(world_radius);
-            let max_aabb = world_pos + Vec2::splat(world_radius);
+            let min_aabb = world_pos - glam::Vec2::splat(world_radius);
+            let max_aabb = world_pos + glam::Vec2::splat(world_radius);
 
-            // Get the grid bounds using the current wireframe's level
+            // Get the grid tile indices from the engine
             let (min_g, max_g) = SignalField::get_tile_range(min_aabb, max_aabb, selected_level);
 
-            // Indigo fill (slightly more transparent than the lines)
             let highlight_color = egui::Color32::from_rgba_unmultiplied(63, 81, 181, 25);
 
             for gx in min_g.x..max_g.x {
                 for gy in min_g.y..max_g.y {
-                    let tile_min = egui::pos2(gx as f32 * cell_size, gy as f32 * cell_size);
-                    let tile_max =
-                        egui::pos2((gx + 1) as f32 * cell_size, (gy + 1) as f32 * cell_size);
+                    // Determine the World-Space corners of this specific tile
+                    let world_tile_min =
+                        glam::Vec2::new(gx as f32 * world_cell_size, gy as f32 * world_cell_size);
+                    let world_tile_max = glam::Vec2::new(
+                        (gx + 1) as f32 * world_cell_size,
+                        (gy + 1) as f32 * world_cell_size,
+                    );
+
+                    // Project those World coordinates to Screen pixels
+                    let tile_min = Self::world_to_screen(world_tile_min, frame, screen_rect);
+                    let tile_max = Self::world_to_screen(world_tile_max, frame, screen_rect);
 
                     painter.rect_filled(
                         egui::Rect::from_min_max(tile_min, tile_max),
@@ -799,8 +823,19 @@ impl Presenter {
         let grid_color = egui::Color32::from_rgba_unmultiplied(63, 81, 181, 40);
         let stroke = egui::Stroke::new(1.0, grid_color);
 
-        // Vertical Lines
-        let mut x = (screen_rect.min.x / cell_size).floor() * cell_size;
+        // Find where the World (0,0) point is currently located on your monitor
+        let world_zero = Self::world_to_screen(glam::Vec2::ZERO, frame, screen_rect);
+
+        // 1. Vertical Lines
+        // Use modulo to find the first line position relative to the viewport edge
+        let mut x = world_zero.x % screen_cell_size;
+        while x < screen_rect.min.x {
+            x += screen_cell_size;
+        }
+        while x > screen_rect.min.x + screen_cell_size {
+            x -= screen_cell_size;
+        }
+
         while x <= screen_rect.max.x {
             painter.line_segment(
                 [
@@ -809,11 +844,18 @@ impl Presenter {
                 ],
                 stroke,
             );
-            x += cell_size;
+            x += screen_cell_size;
         }
 
-        // Horizontal Lines
-        let mut y = (screen_rect.min.y / cell_size).floor() * cell_size;
+        // 2. Horizontal Lines
+        let mut y = world_zero.y % screen_cell_size;
+        while y < screen_rect.min.y {
+            y += screen_cell_size;
+        }
+        while y > screen_rect.min.y + screen_cell_size {
+            y -= screen_cell_size;
+        }
+
         while y <= screen_rect.max.y {
             painter.line_segment(
                 [
@@ -822,13 +864,75 @@ impl Presenter {
                 ],
                 stroke,
             );
-            y += cell_size;
+            y += screen_cell_size;
         }
+    }
+
+    // takes an world position and calculates exactly which monitor pixel should represent it
+    fn world_to_screen(world_pos: Vec2, frame: &FrameData, viewport: egui::Rect) -> egui::Pos2 {
+        let camera = &frame.camera_xform;
+
+        // 1. Calculate the "Base Scale" (How many pixels = 1 world unit)
+        // We anchor to the Height so that vertical view remains consistent.
+        let base_scale = viewport.height() / frame.internal_res.y;
+
+        // 2. Combine with Camera Zoom (1.0 / scale)
+        let total_scale = base_scale * (1.0 / camera.scale);
+
+        // 3. Translation: World-to-Camera relative distance
+        let relative = world_pos - camera.position;
+
+        // 4. Final Mapping to Screen
+        // We multiply the relative distance by the total scale and add to center
+        let screen_offset = egui::vec2(relative.x * total_scale, relative.y * total_scale);
+        viewport.center() + screen_offset
+    }
+
+    // Untested
+    pub fn screen_to_world(
+        screen_pos: egui::Pos2,
+        frame: &FrameData,
+        viewport: egui::Rect,
+    ) -> Vec2 {
+        let camera = &frame.camera_xform;
+
+        // 1. Calculate the same base scale used for rendering
+        let base_scale = viewport.height() / frame.internal_res.y;
+
+        // 2. The Total Scale (Pixels per World Unit)
+        let total_scale = base_scale * (1.0 / camera.scale);
+
+        // 3. Get the vector from the center of the screen to the mouse click
+        let relative_screen = screen_pos - viewport.center();
+
+        // 4. Divide by the scale to get World Units
+        let relative_world = Vec2::new(
+            relative_screen.x / total_scale,
+            relative_screen.y / total_scale,
+        );
+
+        // 5. Add back the camera position to get absolute world coords
+        camera.position + relative_world
     }
 }
 
 impl eframe::App for Presenter {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let current_size = ctx.viewport_rect().size();
+
+        if current_size != self.last_viewport_size {
+            // 1. Update the local tracker
+            self.last_viewport_size = current_size;
+
+            // 2. Dispatch ONLY once per resize
+            let _ = self.command_sender.send(
+                EngineCommand::UpdateViewport(glam::Vec2::new(current_size.x, current_size.y))
+                    .into(),
+            );
+
+            println!("Viewport resized to: {:?}", current_size); // Debug confirmation
+        }
+
         // 1. Drain the channel to get the newest frame from the engine
         let mut newest_arrived = None;
         while let Ok(frame) = self.receiver.try_recv() {
