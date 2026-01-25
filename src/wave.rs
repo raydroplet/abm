@@ -360,7 +360,130 @@ impl SignalField {
         }
     }
 
-    pub fn scan_cone_occluded(
+    pub fn scan_occluded(
+        &self,
+        key: SignalKey,
+        layer_mask: LevelMask,
+        mut callback: impl FnMut(&Signal, &SignalKey, ShadowMask),
+    ) {
+        let scanning = self.active_levels & layer_mask;
+        let viewer = self.store.get(&key).expect("Invalid key");
+
+        // 1. BROAD PHASE SETUP (AABB & Constants)
+        let min_aabb = viewer.origin - Vec2::splat(viewer.outer_radius);
+        let max_aabb = viewer.origin + Vec2::splat(viewer.outer_radius);
+
+        // Pre-calc cone geometry for projection
+        let angle_cos = viewer.angle_cos;
+        let half_cone_sin = (1.0 - angle_cos * angle_cos).max(0.0).sqrt();
+        let cone_right = Vec2::new(-viewer.direction.y, viewer.direction.x);
+
+        // 2. TILE COLLECTION (Sortable Buffer)
+        // We collect all potentially visible tiles first to sort them front-to-back
+        let mut tile_buffer: SmallVec<[(f32, TileKey); 32]> = SmallVec::new();
+
+        for level in scanning.iter_ones() {
+            let (min_range, max_range) = Self::get_tile_range(min_aabb, max_aabb, level);
+            let cell_size = Self::get_level_size(level);
+
+            for gx in min_range.x..max_range.x {
+                for gy in min_range.y..max_range.y {
+                    let t_key = TileKey {
+                        level: level as u8,
+                        x: gx,
+                        y: gy,
+                    };
+
+                    if self.grid.contains_key(&t_key) {
+                        let dist =
+                            Self::dist_sq_point_to_tile(viewer.origin, gx, gy, cell_size).sqrt();
+                        // Bias by cell size so larger tiles (usually walls/terrain)
+                        // are processed earlier if distances are equal.
+                        tile_buffer.push((dist - cell_size, t_key));
+                    }
+                }
+            }
+        }
+
+        // Sort tiles by distance (closest first)
+        tile_buffer
+            .sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // 3. OCCLUSION EXECUTION
+        let mut occlusion_buffer: ShadowMask = BitArray::ZERO;
+        let mut signal_buffer: SmallVec<[(&Signal, &SignalKey, f32); 16]> = SmallVec::new();
+
+        for (_, tile_key) in tile_buffer {
+            if occlusion_buffer.all() {
+                break;
+            } // View is fully blocked
+
+            if let Some(bucket) = self.grid.get(&tile_key) {
+                signal_buffer.clear();
+
+                // Bucket Pass: Filter and pre-calculate distances
+                for (sig_key, emit_mask) in bucket {
+                    if *sig_key == key {
+                        continue;
+                    } // Don't occlude yourself
+
+                    // Filter by Sense Mask (Does the viewer care about this signal type?)
+                    if (*emit_mask & viewer.sense_mask).any() {
+                        if let Some(target) = self.store.get(sig_key) {
+                            let dist = (target.origin - viewer.origin).length();
+                            let edge_dist = dist - target.outer_radius;
+
+                            if edge_dist < viewer.outer_radius {
+                                signal_buffer.push((target, sig_key, edge_dist));
+                            }
+                        }
+                    }
+                }
+
+                // Sort individual signals within the tile front-to-back
+                signal_buffer.sort_unstable_by(|a, b| {
+                    a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                for (sig, sig_key, edge_dist) in &signal_buffer {
+                    // Check if target is actually in the viewer's cone
+                    if !self.check_intersection_cone_sphere(viewer, sig) {
+                        continue;
+                    }
+
+                    let center_dist = edge_dist + sig.outer_radius;
+                    let proj_mask = Self::project_to_view_line(
+                        sig,
+                        viewer.origin,
+                        viewer.direction,
+                        cone_right,
+                        half_cone_sin,
+                        center_dist,
+                    );
+
+                    if proj_mask.not_any() {
+                        continue;
+                    }
+
+                    // Check visibility against current occlusion buffer
+                    let visible_bits = proj_mask & (!occlusion_buffer);
+
+                    if visible_bits.any() {
+                        callback(sig, sig_key, visible_bits);
+                    }
+
+                    // If this signal is an occluder (e.g., has a 'Static' or 'Wall' bit set),
+                    // add its projection to the buffer.
+                    // Note: You might want to pass a specific 'occluder_mask' as an argument.
+                    if (sig.emit_mask & viewer.sense_mask).any() {
+                        occlusion_buffer |= proj_mask;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn scan_cone_occluded_old(
         &self,
         origin: Vec2,
         direction: Vec2,
@@ -389,7 +512,7 @@ impl SignalField {
 
         // Buffer for tiles to process: (SortKey, TileKey)
         // SortKey = Distance - LevelBias. We want closest tiles first.
-        let mut tile_buffer: SmallVec<[(f32, TileKey); 64]> = SmallVec::new();
+        let mut tile_buffer: SmallVec<[(f32, TileKey); 16]> = SmallVec::new();
 
         // 1. TILE COLLECTION PHASE
         for level in scanning.iter_ones() {
@@ -623,7 +746,11 @@ impl SignalField {
     }
 
     // WARN: math not asserted, but it works as expected
-    pub fn check_intersection_cone_sphere(&self, viewer_cone: &Signal, target_sphere: &Signal) -> bool {
+    pub fn check_intersection_cone_sphere(
+        &self,
+        viewer_cone: &Signal,
+        target_sphere: &Signal,
+    ) -> bool {
         // 1. Vector Setup
         let to_target = target_sphere.origin - viewer_cone.origin;
         let dist_sq = to_target.length_squared();

@@ -67,8 +67,13 @@ impl Producer {
                     Err(_) => {}
                 }
 
-                if self.to_tick || self.single_step {
+                // Inside Producer::run_thread's loop
+                if self.to_tick {
+                    // Normal play mode: uses the internal while-loop with FIXED_DT
                     engine.tick();
+                } else if self.single_step {
+                    // Debug step mode: forces exactly one simulation frame
+                    engine.tick_once();
                     self.single_step = false;
                 }
 
@@ -383,6 +388,7 @@ impl Presenter {
     ) {
         let padding = 5.0;
         egui::Window::new("Inspector")
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(padding, -padding))
             .default_width(0.0)
             .pivot(egui::Align2::RIGHT_TOP)
             .default_pos(egui::pos2(
@@ -445,8 +451,8 @@ impl Presenter {
                             ui.label("X");
                             let response = ui.add(
                                 egui::DragValue::new(&mut transform.scale)
-                                    .speed(0.001)
-                                    .range(0.001..=f32::MAX),
+                                    .speed(1.0)
+                                    .range(0.1..=f32::MAX),
                             );
                             if response.changed() {
                                 let _ = command_channel.send(
@@ -636,7 +642,7 @@ impl Presenter {
     }
 
     fn render_agents(painter: &egui::Painter, frame: &FrameData) {
-        let stroke_color = egui::Color32::WHITE;
+        let stroke_color = egui::Color32::from_rgba_unmultiplied(200, 200, 200, 155);
         let stroke_width = 1.0;
         //
         let viewport = painter.clip_rect();
@@ -650,6 +656,7 @@ impl Presenter {
                 data.color[2],
                 data.color[3],
             );
+
             let signal = &data.signal;
 
             // 2. Project the origin
@@ -794,7 +801,7 @@ impl Presenter {
             // Get the grid tile indices from the engine
             let (min_g, max_g) = SignalField::get_tile_range(min_aabb, max_aabb, selected_level);
 
-            let highlight_color = egui::Color32::from_rgba_unmultiplied(63, 81, 181, 25);
+            let highlight_color = egui::Color32::from_rgba_unmultiplied(63, 81, 111, 55);
 
             for gx in min_g.x..max_g.x {
                 for gy in min_g.y..max_g.y {

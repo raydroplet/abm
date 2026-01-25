@@ -94,8 +94,9 @@ pub struct Label {
     pub name: String,
 }
 
+// won't bother for now
 pub struct Camera {
-    pub level_mask: LevelMask,
-    pub signal_mask: SignalMask,
-    pub zoom: f32,
+    // pub level_mask: LevelMask,
+    // pub signal_mask: SignalMask,
+    // pub zoom: f32,
 }
