@@ -440,7 +440,7 @@ impl Presenter {
                         ui.horizontal(|ui| {
                             ui.label("X");
                             let response =
-                                ui.add(egui::DragValue::new(&mut transform.scale).speed(1.0));
+                                ui.add(egui::DragValue::new(&mut transform.scale).speed(0.001));
                             if response.changed() {
                                 let _ = command_channel.send(
                                     EngineCommand::UpdateTransform(view.entity, *transform).into(),

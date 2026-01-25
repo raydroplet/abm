@@ -49,15 +49,13 @@ pub struct FrameData {
     pub agents: Vec<AgentRenderData>, // The "Points" for the GPU
     pub debug_info: DebugInfo,
     //
-    //////
-    // 1. THE VIEW (Read-Only for GUI, Write-Only for Engine)
+    pub camera_xform: Transform,
+    //
+    // (Read-Only for GUI, Write-Only for Engine)
     // The Engine guarantees this is always populated with the latest reality.
     // The GUI just reads this to draw the window.
     pub inspection_view: InspectionData,
-    // 2. THE COMMAND (Write-Only for GUI, Read-Only for Engine)
-    // The GUI only touches this if the user CHANGED something.
-    // The Engine checks this to see if it needs to update the ECS.
-    pub inspection_entities: Vec<(Entity, Label)>,
+    pub inspection_entities: Vec<(Entity, Label)>, // for the hierarchy window
 }
 
 //////////////////
@@ -72,9 +70,10 @@ pub struct Engine {
     //
     signal_field: SignalField,
     //
-    camera_dimension: Vec2,
     //
     selected_entity: Entity,
+    camera_entity: Entity,
+    screen_dimension: Vec2,
 }
 
 impl Engine {
@@ -84,6 +83,7 @@ impl Engine {
         let width = 1024.0;
         let height = 768.0;
 
+        let camera_id = Self::spawn_camera(width, height, &mut world, &mut signal_field);
         Self::spawn_dummy_entities(width, height, &mut world, &mut signal_field);
         let (player_id, player_vision_id) = Self::spawn_dummy_player(&mut world, &mut signal_field);
 
@@ -94,8 +94,9 @@ impl Engine {
             time_accumulator: 0.0,
             last_tick_time_ms: 0.0,
             signal_field, // Store the layer
-            camera_dimension: Vec2::new(width, height),
+            camera_entity: camera_id,
             selected_entity: player_vision_id,
+            screen_dimension: Vec2::new(width, height),
         }
     }
 
@@ -127,45 +128,71 @@ impl Engine {
         // let mut filter = SignalMask::<1>::default();
         // filter.set(BIT_RENDER, true);
 
-        // // 2. Spatial Query
-        // // We only care about agents the camera can actually see
-        // self.signal_field.scan_volume_rectangle(
-        //     self.camera_position,
-        //     self.camera_dimension + self.camera_position,
-        //     signal_mask,
-        //     layer_mask,
-        //     |signal, entity| {
-        //         // A. Store signal for the GUI/Debug overlays
-        //         // if signal.mask != filter {
-        //         // frame.signals.push(signal.clone());
-        //         // }
-        //
-        //         // B. Fetch visual data from ECS for the GPU
-        //         if let Ok(mut query) = self.world.query_one::<&Model>(*entity) {
-        //             if let Some(model) = query.get() {
-        //                 frame.agents.push(AgentRenderData {
-        //                     signal: signal.clone(),
-        //                     color: [model.r, model.g, model.b, model.a],
-        //                     label: None,
-        //                 });
-        //             }
-        //         }
-        //     },
-        // );
+        // 1. Prepare the query for the specific entity
+        let mut query = self
+            .world
+            .query_one::<(&Transform, &Camera)>(self.camera_entity)
+            .expect("Entity does not exist");
 
-        self.signal_field
-            .scan(self.selected_entity, layer_mask, |signal, entity| {
-                // B. Fetch visual data from ECS for the GPU
-                if let Ok(mut query) = self.world.query_one::<&Model>(*entity) {
-                    if let Some(model) = query.get() {
-                        frame.agents.push(AgentRenderData {
-                            signal: signal.clone(),
-                            color: [model.r, model.g, model.b, model.a],
-                            label: None,
-                        });
-                    }
+        // 2. Fetch the component references from the query
+        let (xform, camera) = query.get().expect("Entity is missing Transform or Camera");
+        let screen_center = self.screen_dimension / 2.0;
+        let zoom = 1.0 / xform.scale; // Scale usually works inversely for zoom
+        //
+        frame.camera_xform = *xform;
+
+        // 2. Spatial Query
+        // We only care about agents the camera can actually see
+        self.signal_field.scan_volume_rectangle(
+            xform.position - ((self.screen_dimension / 2.0) * xform.scale),
+            xform.position + ((self.screen_dimension / 2.0) * xform.scale),
+            signal_mask,
+            layer_mask,
+            |signal, entity| {
+                if let Ok(model) = self.world.get::<&Model>(*entity) {
+                    let mut adjusted_signal = signal.clone();
+
+                    // 1. Center the world on the camera (Translation)
+                    let relative_pos = signal.origin - xform.position;
+
+                    // 2. Apply Zoom (Scaling)
+                    let zoomed_pos = relative_pos * zoom;
+
+                    // 3. Offset to screen center (Stick to center)
+                    adjusted_signal.origin = zoomed_pos + screen_center;
+
+                    // Scale Size - Replace '.radius' with whatever field controls your entity size
+                    adjusted_signal.outer_radius *= zoom;
+
+                    frame.agents.push(AgentRenderData {
+                        signal: adjusted_signal,
+                        color: [model.r, model.g, model.b, model.a],
+                        label: None,
+                    });
                 }
-            });
+            },
+        );
+
+
+        // if self
+        //     .world
+        //     .get::<&SignalEmitter>(self.selected_entity)
+        //     .is_ok()
+        // {
+        //     self.signal_field
+        //         .scan(self.selected_entity, layer_mask, |signal, entity| {
+        //             // B. Fetch visual data from ECS for the GPU
+        //             if let Ok(mut query) = self.world.query_one::<&Model>(*entity) {
+        //                 if let Some(model) = query.get() {
+        //                     frame.agents.push(AgentRenderData {
+        //                         signal: signal.clone(),
+        //                         color: [model.r, model.g, model.b, model.a],
+        //                         label: None,
+        //                     });
+        //                 }
+        //             }
+        //         });
+        // }
 
         // 3. Metadata
         frame.debug_info.tick_counter = self.tick_counter;
@@ -183,11 +210,13 @@ impl Engine {
 
             if let Ok(mut query) = self
                 .world
-                .query_one::<(&Transform, &SignalEmitter)>(self.selected_entity)
+                .query_one::<(&Transform, Option<&SignalEmitter>)>(self.selected_entity)
             {
                 if let Some((transform, emitter)) = query.get() {
                     view.xform = *transform;
-                    view.emitters.push(*emitter);
+                    if let Some(emitter) = emitter {
+                        view.emitters.push(*emitter);
+                    }
                 }
             }
         }
@@ -198,6 +227,41 @@ impl Engine {
     }
 
     ///////////////////
+    /// Spawns the main viewport camera into the ECS world.
+    fn spawn_camera(
+        width: f32,
+        height: f32,
+        world: &mut World,
+        _signal_field: &mut SignalField,
+    ) -> Entity {
+        // 1. Determine starting position (centered in the world)
+        let center = Vec2::new(width * 0.5, height * 0.5);
+
+        // 2. Prepare Viewport Masks
+        // By default, the camera should be able to "see" everything.
+        let mut level_mask = LevelMask::default();
+        level_mask.fill(true);
+
+        let mut signal_mask = SignalMask::default();
+        signal_mask.fill(true);
+
+        // 3. Spawn the Camera Entity
+        world.spawn((
+            Label {
+                name: "Main Camera".to_string(),
+            },
+            Transform {
+                position: center,
+                rotation: 0.0,
+                scale: 0.5, // Camera scale usually represents a zoom multiplier
+            },
+            Camera {
+                level_mask,
+                signal_mask,
+                zoom: 1.0,
+            },
+        ))
+    }
 
     fn spawn_dummy_entities(
         width: f32,
@@ -333,17 +397,17 @@ impl Engine {
                         xform.position += vel.linear * FIXED_DT;
 
                         // Collision Logic (Bounce off walls)
-                        if xform.position.x >= self.camera_dimension.x {
+                        if xform.position.x >= self.screen_dimension.x {
                             vel.linear.x *= -1.0;
-                            xform.position.x = self.camera_dimension.x;
+                            xform.position.x = self.screen_dimension.x;
                         }
                         if xform.position.x <= 0.0 {
                             vel.linear.x *= -1.0;
                             xform.position.x = 0.0;
                         }
-                        if xform.position.y >= self.camera_dimension.y {
+                        if xform.position.y >= self.screen_dimension.y {
                             vel.linear.y *= -1.0;
-                            xform.position.y = self.camera_dimension.y;
+                            xform.position.y = self.screen_dimension.y;
                         }
                         if xform.position.y <= 0.0 {
                             vel.linear.y *= -1.0;

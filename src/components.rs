@@ -95,6 +95,7 @@ pub struct Label {
 }
 
 pub struct Camera {
-    level_mask: LevelMask,
-    signal_mask: SignalMask,
+    pub level_mask: LevelMask,
+    pub signal_mask: SignalMask,
+    pub zoom: f32,
 }

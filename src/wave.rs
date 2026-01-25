@@ -293,22 +293,11 @@ impl SignalField {
         let scanning = self.active_levels & layer_mask;
 
         for level in scanning.iter_ones() {
-            // let level = scanning.trailing_zeros() as u8;
-            // scanning &= !(1 << level);
-
-            let cell_size = (1 << level) as f32;
-
-            // 1. Calculate the range of tiles this Volume touches
-            // We PAD the search by -1/+1 because a signal in a neighbor cell
-            // might have a radius that reaches into this volume.
-            let min_grid_x = ((min[0] / cell_size).floor() as i32) - 1;
-            let max_grid_x = ((max[0] / cell_size).floor() as i32) + 1;
-            let min_grid_y = ((min[1] / cell_size).floor() as i32) - 1;
-            let max_grid_y = ((max[1] / cell_size).floor() as i32) + 1;
+            let (min_g, max_g) = Self::get_tile_range(min, max, level);
 
             // 2. Iterate the range (The Volume Loop)
-            for gx in min_grid_x..max_grid_x {
-                for gy in min_grid_y..max_grid_y {
+            for gx in min_g.x..max_g.x {
+                for gy in min_g.y..max_g.y {
                     if let Some(bucket) = self.grid.get(&TileKey {
                         level: level as u8,
                         x: gx,
@@ -318,11 +307,7 @@ impl SignalField {
                             // Quick Mask Filter
                             if (*sig_mask & query_mask).any() {
                                 if let Some(sig) = self.store.get(key) {
-                                    // 3. Precise Collision Check
-                                    // We use AABB vs Circle here to be safe
-                                    // if self.check_aabb_circle_collision(min, max, sig) {
                                     callback(sig, key);
-                                    // }
                                 }
                             }
                         }
@@ -331,63 +316,6 @@ impl SignalField {
             }
         }
     }
-
-    // pub fn scan_volume_cone(
-    //     &self,
-    //     origin: Vec2,
-    //     direction: Vec2,
-    //     angle_cos: f32,
-    //     outer_radius: f32,
-    //     query_mask: SignalMask,
-    //     layer_mask: LevelMask,
-    //     mut callback: impl FnMut(&Signal),
-    // ) {
-    //     let scanning = self.active_levels & layer_mask;
-    //
-    //     // 1. BROAD PHASE: Calculate a loose Bounding Box
-    //     // Optimizing the AABB of a rotated cone is hard.
-    //     // It is much faster to just query the square AABB of the full radius.
-    //     // It over-selects tiles, but the Narrow Phase filters them out cheaply.
-    //     let min_aabb = origin - Vec2::splat(outer_radius);
-    //     let max_aabb = origin + Vec2::splat(outer_radius);
-    //
-    //     for level in scanning.iter_ones() {
-    //         let cell_size = (1 << level) as f32;
-    //
-    //         // Standard Grid Iteration (Same as scan_aabb)
-    //         let min_gx = (min_aabb.x / cell_size).floor() as i32 - 1;
-    //         let max_gx = (max_aabb.x / cell_size).floor() as i32 + 1;
-    //         let min_gy = (min_aabb.y / cell_size).floor() as i32 - 1;
-    //         let max_gy = (max_aabb.y / cell_size).floor() as i32 + 1;
-    //
-    //         for gx in min_gx..max_gx {
-    //             for gy in min_gy..max_gy {
-    //                 if let Some(bucket) = self.grid.get(&TileKey {
-    //                     level: level as u8,
-    //                     x: gx,
-    //                     y: gy,
-    //                 }) {
-    //                     for (key, sig_mask) in bucket {
-    //                         if (*sig_mask & query_mask).any() {
-    //                             if let Some(target_signal) = self.store.get(key) {
-    //                                 // 2. NARROW PHASE: Cone vs Circle Intersection
-    //                                 if self.check_intersection_cone(
-    //                                     origin,
-    //                                     direction,
-    //                                     angle_cos,
-    //                                     outer_radius,
-    //                                     target_signal,
-    //                                 ) {
-    //                                     callback(target_signal);
-    //                                 }
-    //                             }
-    //                         }
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }
 
     pub fn scan(
         &self,
@@ -402,13 +330,11 @@ impl SignalField {
         // Optimizing the AABB of a rotated cone is hard.
         // query the square AABB of the full (circle) radius.
         // It over-selects tiles, the Narrow Phase filters them out.
-        // A better bounding box algorithm may benifit in high range scenarios.
+        // A better bounding box algorithm may benefit in high range scenarios.
         let min_aabb = signal.origin - Vec2::splat(signal.outer_radius);
         let max_aabb = signal.origin + Vec2::splat(signal.outer_radius);
 
         for level in scanning.iter_ones() {
-            // let cell_size = SignalField::get_level_size(level); // this likely can be removed
-            // from here
             let (min_range, max_range) = Self::get_tile_range(min_aabb, max_aabb, level);
 
             for gx in min_range.x..max_range.x {
@@ -697,7 +623,7 @@ impl SignalField {
     }
 
     // WARN: math not asserted, but it works as expected
-    fn check_intersection_cone_sphere(&self, viewer_cone: &Signal, target_sphere: &Signal) -> bool {
+    pub fn check_intersection_cone_sphere(&self, viewer_cone: &Signal, target_sphere: &Signal) -> bool {
         // 1. Vector Setup
         let to_target = target_sphere.origin - viewer_cone.origin;
         let dist_sq = to_target.length_squared();
@@ -870,21 +796,6 @@ impl SignalField {
 
         false
     }
-
-    // fn check_aabb_circle_collision(&self, min: Vec2, max: Vec2, sig: &Signal) -> bool {
-    //     // Find the point on the AABB closest to the sphere center
-    //     let closest_x = sig.origin[0].clamp(min[0], max[0]);
-    //     let closest_y = sig.origin[1].clamp(min[1], max[1]);
-    //
-    //     // Calculate distance from that point to the circle's center
-    //     let dx = sig.origin[0] - closest_x;
-    //     let dy = sig.origin[1] - closest_y;
-    //
-    //     let distance_squared = (dx * dx) + (dy * dy);
-    //
-    //     // Check if less than radius squared
-    //     distance_squared < (sig.outer_radius * sig.outer_radius)
-    // }
 
     fn get_coordinates(outer_radius: f32, origin: Vec2) -> TileKey {
         let level = Self::get_level(outer_radius);
