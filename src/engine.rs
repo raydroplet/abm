@@ -1,5 +1,6 @@
 // engine.rs
 
+use bitvec::prelude::*;
 use crate::components::*;
 use crate::wave::{LevelMask, Signal, SignalField, SignalMask};
 use hecs::Entity;
@@ -315,6 +316,9 @@ impl Engine {
         to_render: &mut FxHashMap<hecs::Entity, AgentRenderData>,
     ) {
         // 1. Validate that the selected entity exists and has a SignalEmitter
+
+        let occlusion_mask = BitArray::ZERO;
+        let mut i = 0;
         if self
             .world
             .get::<&SignalEmitter>(self.selected_entity)
@@ -325,6 +329,7 @@ impl Engine {
             self.signal_field.scan_occluded(
                 self.selected_entity,
                 layer_mask,
+                occlusion_mask,
                 |signal, entity, visible_bits| {
                     // 3. Only process if the entity has a Model component to render
                     if let Ok(mut query) = self.world.query_one::<&Model>(*entity) {
@@ -334,17 +339,17 @@ impl Engine {
                         if let Some(model) = query.get() {
                             let data = AgentRenderData {
                                 signal: *signal,
-                                color: [model.r, model.g, model.b, model.a], // Electric Cyan for detected
+                                color: [model.r, model.g, model.b, model.a],
                                 label: Some(visible_bits.count_ones() as u8),
-                                // If you added a field for the mask in AgentRenderData:
-                                // visibility: visible_bits,
                             };
 
+                            i += 1;
                             to_render.insert(*entity, data);
                         }
                     }
                 },
             );
+            // println!("count {}", i);
         }
     }
 

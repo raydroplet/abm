@@ -364,27 +364,26 @@ impl SignalField {
         &self,
         key: SignalKey,
         layer_mask: LevelMask,
+        occlusion_mask: LevelMask,
         mut callback: impl FnMut(&Signal, &SignalKey, ShadowMask),
     ) {
         let scanning = self.active_levels & layer_mask;
         let viewer = self.store.get(&key).expect("Invalid key");
 
-        // 1. BROAD PHASE SETUP (AABB & Constants)
+        // 1. PRE-CALCULATION
         let min_aabb = viewer.origin - Vec2::splat(viewer.outer_radius);
         let max_aabb = viewer.origin + Vec2::splat(viewer.outer_radius);
 
-        // Pre-calc cone geometry for projection
-        let angle_cos = viewer.angle_cos;
-        let half_cone_sin = (1.0 - angle_cos * angle_cos).max(0.0).sqrt();
-        let cone_right = Vec2::new(-viewer.direction.y, viewer.direction.x);
+        // Convert the stored cosine back to radians for projection
+        let half_fov_radians = viewer.angle_cos.clamp(-1.0, 1.0).acos();
 
-        // 2. TILE COLLECTION (Sortable Buffer)
-        // We collect all potentially visible tiles first to sort them front-to-back
-        let mut tile_buffer: SmallVec<[(f32, TileKey); 32]> = SmallVec::new();
+        // 2. COLLECTION PHASE (Flattened)
+        // We skip the 'tile_buffer' entirely. We go straight to signals.
+        // Capacity guess: 64 is usually plenty to avoid re-allocation on the fly.
+        let mut master_signal_buffer: SmallVec<[(&Signal, &SignalKey, f32); 64]> = SmallVec::new();
 
         for level in scanning.iter_ones() {
             let (min_range, max_range) = Self::get_tile_range(min_aabb, max_aabb, level);
-            let cell_size = Self::get_level_size(level);
 
             for gx in min_range.x..max_range.x {
                 for gy in min_range.y..max_range.y {
@@ -394,91 +393,59 @@ impl SignalField {
                         y: gy,
                     };
 
-                    if self.grid.contains_key(&t_key) {
-                        let dist =
-                            Self::dist_sq_point_to_tile(viewer.origin, gx, gy, cell_size).sqrt();
-                        // Bias by cell size so larger tiles (usually walls/terrain)
-                        // are processed earlier if distances are equal.
-                        tile_buffer.push((dist - cell_size, t_key));
+                    // Direct Grid Access
+                    if let Some(bucket) = self.grid.get(&t_key) {
+                        for (sig_key, emit_mask) in bucket {
+                            // Filter 1: Sense Mask
+                            if (*emit_mask & viewer.sense_mask).any() {
+                                if let Some(target) = self.store.get(sig_key) {
+                                    let dist = (target.origin - viewer.origin).length();
+                                    let edge_dist = dist - target.outer_radius;
+
+                                    // Filter 2: Strict Radius Check
+                                    // (Discard tile corners outside the view circle)
+                                    if edge_dist > viewer.outer_radius {
+                                        continue;
+                                    }
+
+                                    master_signal_buffer.push((target, sig_key, edge_dist));
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
 
-        // Sort tiles by distance (closest first)
-        tile_buffer
-            .sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        // 3. SORTING PHASE
+        // Sort everything by distance (closest first).
+        master_signal_buffer
+            .sort_unstable_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
 
-        // 3. OCCLUSION EXECUTION
-        let mut occlusion_buffer: ShadowMask = BitArray::ZERO;
-        let mut signal_buffer: SmallVec<[(&Signal, &SignalKey, f32); 16]> = SmallVec::new();
+        // 4. PROJECTION & OCCLUSION PHASE
+        let mut shadow_mask: ShadowMask = BitArray::ZERO;
 
-        for (_, tile_key) in tile_buffer {
-            if occlusion_buffer.all() {
-                break;
-            } // View is fully blocked
+        for (sig, sig_key, edge_dist) in master_signal_buffer {
+            let center_dist = edge_dist + sig.outer_radius;
 
-            if let Some(bucket) = self.grid.get(&tile_key) {
-                signal_buffer.clear();
+            let projection_mask = Self::project_to_view_angular(
+                sig,
+                viewer.origin,
+                viewer.direction,
+                half_fov_radians,
+                center_dist,
+            );
 
-                // Bucket Pass: Filter and pre-calculate distances
-                for (sig_key, emit_mask) in bucket {
-                    if *sig_key == key {
-                        continue;
-                    } // Don't occlude yourself
+            // Visibility Check: Is any part of the projection NOT in the shadow?
+            let is_visible = (projection_mask & !shadow_mask).any();
 
-                    // Filter by Sense Mask (Does the viewer care about this signal type?)
-                    if (*emit_mask & viewer.sense_mask).any() {
-                        if let Some(target) = self.store.get(sig_key) {
-                            let dist = (target.origin - viewer.origin).length();
-                            let edge_dist = dist - target.outer_radius;
+            if is_visible {
+                callback(sig, sig_key, shadow_mask);
+            }
 
-                            if edge_dist < viewer.outer_radius {
-                                signal_buffer.push((target, sig_key, edge_dist));
-                            }
-                        }
-                    }
-                }
-
-                // Sort individual signals within the tile front-to-back
-                signal_buffer.sort_unstable_by(|a, b| {
-                    a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal)
-                });
-
-                for (sig, sig_key, edge_dist) in &signal_buffer {
-                    // Check if target is actually in the viewer's cone
-                    if !self.check_intersection_cone_sphere(viewer, sig) {
-                        continue;
-                    }
-
-                    let center_dist = edge_dist + sig.outer_radius;
-                    let proj_mask = Self::project_to_view_line(
-                        sig,
-                        viewer.origin,
-                        viewer.direction,
-                        cone_right,
-                        half_cone_sin,
-                        center_dist,
-                    );
-
-                    if proj_mask.not_any() {
-                        continue;
-                    }
-
-                    // Check visibility against current occlusion buffer
-                    let visible_bits = proj_mask & (!occlusion_buffer);
-
-                    if visible_bits.any() {
-                        callback(sig, sig_key, visible_bits);
-                    }
-
-                    // If this signal is an occluder (e.g., has a 'Static' or 'Wall' bit set),
-                    // add its projection to the buffer.
-                    // Note: You might want to pass a specific 'occluder_mask' as an argument.
-                    if (sig.emit_mask & viewer.sense_mask).any() {
-                        occlusion_buffer |= proj_mask;
-                    }
-                }
+            // Update Shadow: If this object blocks light, add it to the mask
+            if (sig.emit_mask & occlusion_mask).any() {
+                shadow_mask |= projection_mask;
             }
         }
     }
@@ -866,6 +833,61 @@ impl SignalField {
             mask[start_idx..end_idx].fill(true);
         }
 
+        mask
+    }
+
+    /// Projects a signal onto the view line using exact angular math.
+    /// "half_fov" should be the cone half-angle in radians (e.g., PI/4 for 90 deg FOV).
+    fn project_to_view_angular(
+        sig: &Signal,
+        origin: Vec2,
+        cone_dir: Vec2,
+        half_fov: f32,
+        dist: f32,
+    ) -> ShadowMask {
+        let total_bits = std::mem::size_of::<ShadowMask>() * 8;
+        let max_idx = total_bits as f32;
+
+        if dist < 0.0001 {
+            return !ShadowMask::ZERO;
+        }
+
+        // 1. Calculate the Angle of the object relative to the view direction
+        let to_target = sig.origin - origin;
+
+        // "perp_dot" gives us the signed lateral distance (2D cross product equivalent)
+        // assuming cone_dir is normalized.
+        let det = cone_dir.x * to_target.y - cone_dir.y * to_target.x;
+        let dot = cone_dir.dot(to_target);
+
+        // atan2 gives us the exact angle in radians (-PI to PI) relative to forward
+        let angle = det.atan2(dot);
+
+        // 2. Calculate the Angular Width of the object
+        // A sphere of radius R at distance D spans an angle of 2 * asin(R/D).
+        // (We use asin to handle the curvature of the sphere correctly close up)
+        let angular_half_width = (sig.outer_radius / dist).min(1.0).asin();
+
+        // 3. Map Angles to Screen Coordinates (-1.0 to 1.0)
+        // We normalize by the FOV.
+        let screen_center = angle / half_fov;
+        let screen_width = angular_half_width / half_fov;
+
+        // 4. Bit Indices Calculation (Linear Space)
+        let start_ratio = 0.5 + (0.5 * (screen_center - screen_width));
+        let end_ratio = 0.5 + (0.5 * (screen_center + screen_width));
+
+        let start_idx = (start_ratio * max_idx).floor().clamp(0.0, max_idx) as usize;
+        let end_idx = (end_ratio * max_idx).ceil().clamp(0.0, max_idx) as usize;
+
+        if start_idx >= end_idx {
+            return ShadowMask::ZERO;
+        }
+
+        let mut mask = ShadowMask::ZERO;
+        if end_idx > start_idx {
+            mask[start_idx..end_idx].fill(true);
+        }
         mask
     }
 
