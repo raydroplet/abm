@@ -667,7 +667,7 @@ impl Presenter {
             let radius_min = signal.inner_radius * zoom;
 
             // C. Calculate the Half-Angle
-            let half_angle = signal.angle_cos.clamp(-1.0, 1.0).acos();
+            let half_angle = signal.angle_radians * 0.5;
 
             // OPTIMIZATION: Full Circle
             // If ~360 degrees and NOT hollow, use hardware circle
@@ -705,7 +705,7 @@ impl Presenter {
             }
 
             // D. Manual Mesh Generation (Works for all angles)
-            let base_angle = signal.direction.y.atan2(signal.direction.x);
+            let base_angle = signal.unit_direction.y.atan2(signal.unit_direction.x);
             let steps = 32;
             let start_angle = base_angle - half_angle;
             let angle_step = (half_angle * 2.0) / (steps as f32);

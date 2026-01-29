@@ -247,8 +247,8 @@ impl Engine {
             },
         );
 
-        // self.render_player_vision(layer_mask, &mut to_render);
-        self.render_player_vision_occluded(layer_mask, &mut to_render);
+        self.render_player_vision(layer_mask, &mut to_render);
+        // self.render_player_vision_occluded(layer_mask, &mut to_render);
         frame.agents.extend(to_render.into_values());
 
         // 3. Metadata
@@ -422,10 +422,11 @@ impl Engine {
             let layer_mask = SignalMask::default();
 
             // 3. Create Emitter (Sphere Factory)
+            let angle = TAU;
             let emitter = SignalEmitter {
                 radius_max: radius,
                 radius_min: 0.0,
-                cone_angle: std::f32::consts::TAU,
+                cone_angle: angle,
                 emit_mask: signal_mask,
                 sense_mask: signal_mask,
                 layer_mask: layer_mask,
@@ -433,10 +434,10 @@ impl Engine {
 
             let signal = Signal {
                 origin: pos,
-                direction: Vec2::new(0.0, 0.0), // Rotation (irrelevant for sphere)
+                unit_direction: Vec2::new(0.0, 0.0), // Rotation (irrelevant for sphere)
                 outer_radius: radius,           // Outer Radius
                 inner_radius: 0.0,
-                angle_cos: (std::f32::consts::TAU * 0.5).cos(), // Cone Angle: 2*PI (Full Sphere)
+                angle_radians: angle, // Cone Angle: 2*PI (Full Sphere)
                 emit_mask: signal_mask,
                 sense_mask: signal_mask,
             };
@@ -622,10 +623,10 @@ impl Engine {
 
         let player_signal = Signal {
             origin: player_pos,
-            direction: Vec2::new(1.0, 0.0), // Default 0.0 rotation (Right)
+            unit_direction: Vec2::new(1.0, 0.0), // Default 0.0 rotation (Right)
             outer_radius: outer_rad,
             inner_radius: inner_rad,
-            angle_cos: (cone_angle * 0.5).cos(),
+            angle_radians: cone_angle,
             emit_mask: signal_mask,
             sense_mask: signal_mask,
         };
@@ -663,7 +664,7 @@ impl Engine {
         let player_vision_id = world.reserve_entity();
         let scanner_range = 1.0;
         let scale = 200.0;
-        let cone_angle = TAU / 4.0;
+        let cone_angle = TAU / 8.0;
 
         // Component
         let child_emitter = SignalEmitter {
@@ -677,10 +678,10 @@ impl Engine {
 
         let child_signal = Signal {
             origin: player_pos, // Starts at parent position
-            direction: Vec2::X,
+            unit_direction: Vec2::X,
             outer_radius: scanner_range,
             inner_radius: 0.0,
-            angle_cos: (cone_angle * 0.5).cos(), // cos(PI) for full sphere
+            angle_radians: cone_angle, // cos(PI) for full sphere
             emit_mask: signal_mask,
             sense_mask: signal_mask,
         };

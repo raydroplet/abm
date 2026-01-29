@@ -1,10 +1,11 @@
 // wave.rs
 
 use bitvec::prelude::*;
-use glam::{IVec2, Vec2};
+use glam::{IVec2, Mat2, Vec2};
 use rustc_hash::FxHashMap;
 // use slotmap::{SlotMap, new_key_type};
 use smallvec::SmallVec;
+use std::f32::consts::TAU;
 
 // ==================================================================================
 // 1. DATA STRUCTURES
@@ -44,16 +45,15 @@ pub struct TileKey {
 pub struct Signal<const N: usize = 1> {
     // source
     pub origin: Vec2, // !!!
-    pub direction: Vec2,
+    pub unit_direction: Vec2,
     // shape
     pub outer_radius: f32,
     pub inner_radius: f32,
-    pub angle_cos: f32,
+    pub angle_radians: f32,
     // force
     // pub intensity: f32, // How strong?
     // pub falloff: f32,   // How fast it fades?
     // data
-    // pub entity: Entity, // may not even be needed since systems deal with components
     pub emit_mask: SignalMask,
     pub sense_mask: SignalMask,
 }
@@ -229,16 +229,14 @@ impl SignalField {
             // 1. Update Direction
             // We convert the angle back into a normalized Vec2
             let (sin, cos) = new_direction_radians.sin_cos();
-            signal.direction = Vec2::new(cos, sin);
+            signal.unit_direction = Vec2::new(cos, sin);
 
             // 2. Update Aperture (Cone Angle)
             // We assume 'aperture' is the Full Angle (e.g., 90 degrees).
             // The dot product check requires the cosine of the Half Angle.
             //
             // Example:
-            // - Aperture 360 deg (2 PI) -> Half PI -> cos(-1.0) -> Omni
-            // - Aperture 90 deg (PI/2)  -> Half PI/4 -> cos(0.707)
-            signal.angle_cos = (new_angle_radians * 0.5).cos();
+            signal.angle_radians = new_angle_radians;
             signal.inner_radius = inner_radius;
         }
     }
@@ -246,41 +244,41 @@ impl SignalField {
     //////////
     /// Scan
 
-    /// READ: The Scan Loop
-    pub fn scan_point(
-        &self,
-        pos: Vec2,
-        signal_mask: SignalMask,
-        layer_mask: LevelMask,
-        mut callback: impl FnMut(&Signal),
-    ) {
-        let scanning = self.active_levels & layer_mask;
-
-        for level in scanning.iter_ones() {
-            // let level = scanning.trailing_zeros() as u8;
-            // scanning &= !(1 << level);
-
-            let cell_size = (1 << level) as f32;
-            let grid_x = (pos[0] / cell_size).floor() as i32;
-            let grid_y = (pos[1] / cell_size).floor() as i32;
-
-            if let Some(bucket) = self.grid.get(&TileKey {
-                level: level as u8,
-                x: grid_x,
-                y: grid_y,
-            }) {
-                for (key, sig_mask) in bucket {
-                    if (*sig_mask & signal_mask).any() {
-                        if let Some(sig) = self.store.get(key) {
-                            if self.check_intersection_point(pos, sig) {
-                                callback(sig);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // /// READ: The Scan Loop
+    // pub fn scan_point(
+    //     &self,
+    //     pos: Vec2,
+    //     signal_mask: SignalMask,
+    //     layer_mask: LevelMask,
+    //     mut callback: impl FnMut(&Signal),
+    // ) {
+    //     let scanning = self.active_levels & layer_mask;
+    //
+    //     for level in scanning.iter_ones() {
+    //         // let level = scanning.trailing_zeros() as u8;
+    //         // scanning &= !(1 << level);
+    //
+    //         let cell_size = (1 << level) as f32;
+    //         let grid_x = (pos[0] / cell_size).floor() as i32;
+    //         let grid_y = (pos[1] / cell_size).floor() as i32;
+    //
+    //         if let Some(bucket) = self.grid.get(&TileKey {
+    //             level: level as u8,
+    //             x: grid_x,
+    //             y: grid_y,
+    //         }) {
+    //             for (key, sig_mask) in bucket {
+    //                 if (*sig_mask & signal_mask).any() {
+    //                     if let Some(sig) = self.store.get(key) {
+    //                         if self.check_intersection_point(pos, sig) {
+    //                             callback(sig);
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
 
     pub fn scan_volume_rectangle(
         &self,
@@ -348,7 +346,7 @@ impl SignalField {
                             if (*sig_mask & signal.sense_mask).any() {
                                 if let Some(target) = self.store.get(key) {
                                     // 2. NARROW PHASE: Cone vs Circle Intersection
-                                    if self.check_intersection_cone_sphere(signal, target) {
+                                    if self.check_intersection_arc_circle(signal, target) {
                                         callback(target, key);
                                     }
                                 }
@@ -374,13 +372,8 @@ impl SignalField {
         let min_aabb = viewer.origin - Vec2::splat(viewer.outer_radius);
         let max_aabb = viewer.origin + Vec2::splat(viewer.outer_radius);
 
-        // Convert the stored cosine back to radians for projection
-        let half_fov_radians = viewer.angle_cos.clamp(-1.0, 1.0).acos();
-
         // 2. COLLECTION PHASE (Flattened)
-        // We skip the 'tile_buffer' entirely. We go straight to signals.
-        // Capacity guess: 64 is usually plenty to avoid re-allocation on the fly.
-        let mut master_signal_buffer: SmallVec<[(&Signal, &SignalKey, f32); 64]> = SmallVec::new();
+        let mut signal_buffer: SmallVec<[(&Signal, &SignalKey, f32); 64]> = SmallVec::new();
 
         for level in scanning.iter_ones() {
             let (min_range, max_range) = Self::get_tile_range(min_aabb, max_aabb, level);
@@ -408,7 +401,7 @@ impl SignalField {
                                         continue;
                                     }
 
-                                    master_signal_buffer.push((target, sig_key, edge_dist));
+                                    signal_buffer.push((target, sig_key, edge_dist));
                                 }
                             }
                         }
@@ -419,19 +412,22 @@ impl SignalField {
 
         // 3. SORTING PHASE
         // Sort everything by distance (closest first).
-        master_signal_buffer
+        signal_buffer
             .sort_unstable_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
 
         // 4. PROJECTION & OCCLUSION PHASE
         let mut shadow_mask: ShadowMask = BitArray::ZERO;
 
-        for (sig, sig_key, edge_dist) in master_signal_buffer {
+        // Convert the stored cosine back to radians for projection
+        let half_fov_radians = viewer.angle_radians; // BUG: untested
+
+        for (sig, sig_key, edge_dist) in signal_buffer {
             let center_dist = edge_dist + sig.outer_radius;
 
             let projection_mask = Self::project_to_view_angular(
                 sig,
                 viewer.origin,
-                viewer.direction,
+                viewer.unit_direction,
                 half_fov_radians,
                 center_dist,
             );
@@ -678,100 +674,154 @@ impl SignalField {
     //         && dist_sq >= (sig.inner_radius * sig.inner_radius)
     // }
 
-    // BUG: untested
-    fn check_intersection_point(&self, target_pos: Vec2, sig: &Signal) -> bool {
-        let to_target = target_pos - sig.origin;
+    // fn check_intersection_point(&self, target_pos: Vec2, sig: &Signal) -> bool {
+    //     let to_target = target_pos - sig.origin;
+    //
+    //     // 1. Calculate Squared Distance (Cheap: x*x + y*y)
+    //     let dist_sq = to_target.length_squared();
+    //
+    //     // 2. Early Radius Check (Cheap)
+    //     if dist_sq > sig.outer_radius * sig.outer_radius {
+    //         return false;
+    //     }
+    //
+    //     // 3. Dot Product (Un-normalized)
+    //     let dot = sig.direction.dot(to_target);
+    //
+    //     // 4. "Behind" Check
+    //     // If dot is negative, the target is behind us.
+    //     // Unless you have >180 FOV, this is an instant fail.
+    //     if dot < 0.0 {
+    //         return false;
+    //     }
+    //
+    //     // 5. Check
+    //     // Instead of: dot / sqrt(dist_sq) > angle_cos
+    //     // We use:     dot * dot > angle_cos * angle_cos * dist_sq
+    //     let threshold_sq = sig.angle_cos * sig.angle_cos * dist_sq;
+    //
+    //     if dot * dot < threshold_sq {
+    //         return false;
+    //     }
+    //
+    //     true
+    // }
 
-        // 1. Calculate Squared Distance (Cheap: x*x + y*y)
-        let dist_sq = to_target.length_squared();
-
-        // 2. Early Radius Check (Cheap)
-        if dist_sq > sig.outer_radius * sig.outer_radius {
-            return false;
-        }
-
-        // 3. Dot Product (Un-normalized)
-        let dot = sig.direction.dot(to_target);
-
-        // 4. "Behind" Check
-        // If dot is negative, the target is behind us.
-        // Unless you have >180 FOV, this is an instant fail.
-        if dot < 0.0 {
-            return false;
-        }
-
-        // 5. Check
-        // Instead of: dot / sqrt(dist_sq) > angle_cos
-        // We use:     dot * dot > angle_cos * angle_cos * dist_sq
-        let threshold_sq = sig.angle_cos * sig.angle_cos * dist_sq;
-
-        if dot * dot < threshold_sq {
-            return false;
-        }
-
-        true
-    }
-
-    // WARN: math not asserted, but it works as expected
-    pub fn check_intersection_cone_sphere(
+    // NOTE: fully implemented by hand, you may as well not go into the trouble of touching it again
+    pub fn check_intersection_arc_circle(
         &self,
         viewer_cone: &Signal,
-        target_sphere: &Signal,
+        target_circle: &Signal,
     ) -> bool {
-        // 1. Vector Setup
-        let to_target = target_sphere.origin - viewer_cone.origin;
-        let dist_sq = to_target.length_squared();
-        let target_radius = target_sphere.outer_radius;
+        // 1. Circle Intersection
+        //
+        // Interpreting both as circles, check if the edges are too far considering the center/radius
+        // Fórmula para distância entre dois pontos: D^2 = (x_2 - x_1)^2 + (y_2 - y_1)^2
+        // (aka Teorema de Pitágoras, já que a distância é a hipotenusa)
+        // It's better to ^2 the radius sum than to calculate a sqrt on the Distance squared.
 
-        // 2. Max Range Check
-        let max_dist = viewer_cone.outer_radius + target_radius;
-        if dist_sq > max_dist * max_dist {
-            return false;
+        let v = viewer_cone;
+        let t = target_circle;
+        let v_o = v.origin;
+        let t_o = t.origin;
+        let distance_squared =
+            (v_o.x - t_o.x) * (v_o.x - t_o.x) + (v_o.y - t_o.y) * (v_o.y - t_o.y);
+        let max_radius_sum_squared =
+            (v.outer_radius + t.outer_radius) * (v.outer_radius + t.outer_radius);
+        if distance_squared > max_radius_sum_squared {
+            return false; // they can't possibly intersect
         }
 
-        // 3. Min Range Check (Blind Spot Fix)
-        // If the viewer has an inner_radius (blind spot), we check if the
-        // target is fully inside it.
-        let effective_min = (viewer_cone.inner_radius - target_radius).max(0.0);
-        if dist_sq < effective_min * effective_min {
-            return false;
+        // also handle the inner radius
+        // the max(0.0) is to avoid negative squares, which causes unwanted intersetion behavior
+        let hide_limit = (v.inner_radius - t.outer_radius).max(0.0);
+        let hide_limit_sq = hide_limit * hide_limit;
+
+        // 3. The Distance Check
+        // We use '<' because we want to hide it if it is closer than the limit.
+        if distance_squared < hide_limit_sq {
+            return false; // fully hidden inside the blind spot
         }
 
-        // 4. "Inside" Check
-        // If we are physically inside the target volume, we see it.
-        if dist_sq <= (target_radius * target_radius) + 0.00001 {
+        // 2. Angle alignment
+        //
+        //    if the previous test passed, we just need to check for the angle
+        //    half angle is needed considering the cone direction is at the center of the cone_angle
+        //    angle('cone direction', 'target direction') < (cone_angle / 2)
+        //
+
+        let unit_to_target = (target_circle.origin - viewer_cone.origin).normalize();
+        let cosine_limit = (viewer_cone.angle_radians * 0.5).cos();
+        let signals_cosine = viewer_cone.unit_direction.dot(unit_to_target);
+        if cosine_limit < signals_cosine {
             return true;
         }
 
-        // 5. Angle Check (Exact Math)
-        if viewer_cone.angle_cos > -1.0 {
-            let dist = dist_sq.sqrt();
-            if dist < 0.0001 {
+        // 3. Flank check
+        //
+        //    finally, we check if the target intersects the edges of the view cone.
+        //    If we imagine the edges of the view cone as a line (say on x axis) and calculate
+        //    the distance of our target sphere center to it: if radius >= distance then we know
+        //    an intersection happened
+        //
+        //    0. calculate the 'center vector' from the 'cone origin' to the 'target center'
+        //
+        //    1. calculate both edge vectors, and for each one of them:
+        //
+        //    2. project the 'center vector' onto the 'edge vector', this returns a distance
+        //       we will use it to calculate one of the sides of a triangle.
+        //
+        //    3. clamp the line. since the projection assumes a infinite line and our edge vector
+        //       is finite we clamp said casted_length to one of the edges borders if necessary
+        //       => clamped_casted_length = clamp(0, casted_length, radius)
+        //
+        //    4. calculate the full lenght edge vector by multiplying said unit with our clamped_casted_length
+        //       full_edge_vector = (unit_edge_direction * clamped_casted_length)
+        //
+        //    5. By subtracting two vectors that form a triangle, we get a third one that completes it.
+        //       distance_vector = center_vector - full_edge_vector
+        //
+        //    6.
+        //       We can then use this new vector to get the distance to the edge
+        //       distance_squared = distance_vector.length_squared()
+        //
+        //    7. check for an intersection: (target_radius_squared > distance_squared)
+
+        // 0.
+        let center_vector = target_circle.origin - viewer_cone.origin;
+
+        // 1.
+        let center_dir = viewer_cone.unit_direction;
+        let half_angle = viewer_cone.angle_radians * 0.5;
+
+        let rot_left = Mat2::from_angle(half_angle);
+        let rot_right = Mat2::from_angle(-half_angle);
+        let edge_vectors = [rot_left * center_dir, rot_right * center_dir];
+
+        for unit_edge in edge_vectors {
+            // 2.
+            let casted_length: f32 = center_vector.dot(unit_edge);
+
+            // 3.
+            let casted_length = casted_length.clamp(0.0, viewer_cone.outer_radius);
+
+            // 4.
+            let full_edge = unit_edge * casted_length;
+
+            // 5.
+            let distance_vector = center_vector - full_edge;
+
+            //6.
+            let distance_squared = distance_vector.length_squared();
+
+            // 7.
+            let radius_squared = target_circle.outer_radius * target_circle.outer_radius;
+            if radius_squared > distance_squared {
                 return true;
-            } // Singularity guard
-
-            let dir_to_target = to_target / dist;
-
-            // A. Viewer Cone (Alpha)
-            let sin_alpha = (1.0 - viewer_cone.angle_cos * viewer_cone.angle_cos)
-                .max(0.0)
-                .sqrt();
-
-            // B. Target Width (Beta)
-            let ratio = (target_radius / dist).min(1.0);
-            let sin_beta = ratio;
-            let cos_beta = (1.0 - ratio * ratio).max(0.0).sqrt();
-
-            // C. Threshold: cos(alpha + beta)
-            // formula: cos(a)cos(b) - sin(a)sin(b)
-            let expanded_threshold = (viewer_cone.angle_cos * cos_beta) - (sin_alpha * sin_beta);
-
-            if viewer_cone.direction.dot(dir_to_target) < expanded_threshold {
-                return false;
             }
         }
 
-        true
+        false
     }
 
     /// Projects a signal sphere onto the view line.
