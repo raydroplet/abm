@@ -643,7 +643,7 @@ impl Presenter {
 
     fn render_agents(painter: &egui::Painter, frame: &FrameData) {
         let stroke_color = egui::Color32::from_rgba_unmultiplied(200, 200, 200, 155);
-        let stroke_width = 1.0;
+        let stroke_width = 0.0;
         //
         let viewport = painter.clip_rect();
         let camera = &frame.camera_xform;
@@ -675,25 +675,25 @@ impl Presenter {
                 // ---------------------------------------------------------
                 // Draw Occlusion Label
                 // ---------------------------------------------------------
-                if let Some(occlusion_count) = data.label {
-                    // 1. Scale Font Size:
-                    // Multiply a base size (e.g., 14.0 world units) by the zoom factor.
-                    // Clamp it to prevent it from becoming microscopic or massive if needed.
-                    let font_size = (11.0 * zoom).max(1.0);
-
-                    // 2. Position at Top:
-                    // Subtract the visual radius from the Y coordinate to move it to the top edge.
-                    // We add a small padding (e.g. -2.0 * zoom) so it sits slightly outside the circle.
-                    let top_pos = egui::pos2(origin.x, origin.y - radius_max - (0.5 * zoom));
-
-                    painter.text(
-                        top_pos,
-                        egui::Align2::CENTER_BOTTOM, // Anchor BOTTOM so the text sits *on top* of the point
-                        occlusion_count.to_string(),
-                        egui::FontId::proportional(font_size),
-                        egui::Color32::GRAY,
-                    );
-                }
+                // if let Some(occlusion_count) = data.label {
+                //     // 1. Scale Font Size:
+                //     // Multiply a base size (e.g., 14.0 world units) by the zoom factor.
+                //     // Clamp it to prevent it from becoming microscopic or massive if needed.
+                //     let font_size = (11.0 * zoom).max(1.0);
+                //
+                //     // 2. Position at Top:
+                //     // Subtract the visual radius from the Y coordinate to move it to the top edge.
+                //     // We add a small padding (e.g. -2.0 * zoom) so it sits slightly outside the circle.
+                //     let top_pos = egui::pos2(origin.x, origin.y - radius_max - (0.5 * zoom));
+                //
+                //     painter.text(
+                //         top_pos,
+                //         egui::Align2::CENTER_BOTTOM, // Anchor BOTTOM so the text sits *on top* of the point
+                //         occlusion_count.to_string(),
+                //         egui::FontId::proportional(font_size),
+                //         egui::Color32::GRAY,
+                //     );
+                // }
 
                 painter.circle(
                     origin,

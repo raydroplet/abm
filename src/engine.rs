@@ -400,11 +400,10 @@ impl Engine {
     ) {
         let mut rng = rand::rng();
 
-        let mut occlude = false;
         for i in 0..3000 {
             // Random Data
-            let rand_pos_x = rng.random_range(0.0..width);
-            let rand_pos_y = rng.random_range(0.0..height);
+            let rand_pos_x = rng.random_range(width/4.0..(width/4.0)+(width/2.0));
+            let rand_pos_y = rng.random_range(height/4.0..(height/4.0)+(height/2.0));
             let rand_vel_x = rng.random_range(-100.0..100.0);
             let rand_vel_y = rng.random_range(-100.0..100.0);
             // let r_val = rng.random_range(0..=255);
@@ -423,7 +422,8 @@ impl Engine {
             let mut signal_mask = SignalMask::default();
             signal_mask.set(BIT_BOUNDING_VOLUME, true);
             let model;
-            if (i % 300) == 0 {
+            let occlude = (i % 300) == 0;
+            if occlude {
                 signal_mask.set(BIT_OCCLUDE, true);
                 model = Model {
                     r: 200,
@@ -432,16 +432,14 @@ impl Engine {
                     a: 100,
                 };
                 scale = scale * 3.0;
-            } else
-            {
-                model =  Model {
+            } else {
+                model = Model {
                     r: 0,
                     g: 200,
                     b: 0,
                     a: 100,
                 };
             }
-            occlude = !occlude;
             let layer_mask = SignalMask::default();
 
             // 3. Create Emitter (Sphere Factory)
@@ -480,14 +478,20 @@ impl Engine {
                         scale: scale,
                         ..Transform::default()
                     },
-                    Velocity {
-                        linear: Vec2::new(rand_vel_x, rand_vel_y),
-                        ..Velocity::default()
-                    },
                     model,
                     emitter, // <--- Attached immediately
                 ),
             );
+
+            if occlude {
+                let _ = world.insert_one(
+                    id,
+                    Velocity {
+                        linear: Vec2::new(rand_vel_x, rand_vel_y),
+                        ..Velocity::default()
+                    },
+                );
+            }
         }
     }
 
