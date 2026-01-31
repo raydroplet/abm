@@ -1,8 +1,8 @@
 // engine.rs
 
-use bitvec::prelude::*;
 use crate::components::*;
 use crate::wave::{LevelMask, Signal, SignalField, SignalMask};
+use bitvec::prelude::*;
 use hecs::Entity;
 
 use glam::Vec2;
@@ -14,6 +14,7 @@ use std::time::Instant; // or f64::consts::TAU
 
 const FIXED_DT: f32 = 1.0 / 100.0; // Run physics exactly 100 times a second
 const BIT_BOUNDING_VOLUME: usize = 0;
+const BIT_OCCLUDE: usize = 1;
 
 #[derive(Clone, Copy, Debug)]
 pub struct AgentRenderData {
@@ -230,7 +231,7 @@ impl Engine {
         let mut to_render: FxHashMap<hecs::Entity, AgentRenderData> = FxHashMap::default();
 
         // ghost entities
-        self.signal_field.scan_volume_rectangle(
+        self.signal_field.scan_range(
             xform.position - ((self.viewport_size / 2.0) * xform.scale),
             xform.position + ((self.viewport_size / 2.0) * xform.scale),
             signal_mask,
@@ -247,8 +248,8 @@ impl Engine {
             },
         );
 
-        self.render_player_vision(layer_mask, &mut to_render);
-        // self.render_player_vision_occluded(layer_mask, &mut to_render);
+        // self.render_player_vision(layer_mask, &mut to_render);
+        self.render_player_vision_occluded(layer_mask, &mut to_render);
         frame.agents.extend(to_render.into_values());
 
         // 3. Metadata
@@ -296,14 +297,14 @@ impl Engine {
         {
             self.signal_field
                 .scan(self.selected_entity, layer_mask, |signal, entity| {
-                    if let Ok(mut query) = self.world.query_one::<&Model>(*entity) {
+                    if let Ok(mut query) = self.world.query_one::<&Model>(entity) {
                         if let Some(model) = query.get() {
                             let data = AgentRenderData {
                                 signal: *signal,
                                 color: [model.r, model.g, model.b, model.a],
                                 label: None,
                             };
-                            to_render.insert(*entity, data);
+                            to_render.insert(entity, data);
                         }
                     }
                 });
@@ -317,7 +318,8 @@ impl Engine {
     ) {
         // 1. Validate that the selected entity exists and has a SignalEmitter
 
-        let occlusion_mask = BitArray::ZERO;
+        let mut occlusion_mask = BitArray::ZERO;
+        occlusion_mask.set(BIT_OCCLUDE, true);
         let mut i = 0;
         if self
             .world
@@ -332,7 +334,7 @@ impl Engine {
                 occlusion_mask,
                 |signal, entity, visible_bits| {
                     // 3. Only process if the entity has a Model component to render
-                    if let Ok(mut query) = self.world.query_one::<&Model>(*entity) {
+                    if let Ok(mut query) = self.world.query_one::<&Model>(entity) {
                         // 4. Update the render data with detected colors
                         // We pass the 'visible_bits' (ShadowMask) into AgentRenderData
                         // so the GUI shader/painter knows which arcs to actually draw.
@@ -344,7 +346,7 @@ impl Engine {
                             };
 
                             i += 1;
-                            to_render.insert(*entity, data);
+                            to_render.insert(entity, data);
                         }
                     }
                 },
@@ -398,7 +400,8 @@ impl Engine {
     ) {
         let mut rng = rand::rng();
 
-        for _ in 0..1000 {
+        let mut occlude = false;
+        for i in 0..3000 {
             // Random Data
             let rand_pos_x = rng.random_range(0.0..width);
             let rand_pos_y = rng.random_range(0.0..height);
@@ -407,11 +410,11 @@ impl Engine {
             // let r_val = rng.random_range(0..=255);
             // let g_val = rng.random_range(0..=255);
             // let b_val = rng.random_range(0..=255);
-            let color = rng.random_range(200..=255);
+            // let mut color = 200;
 
             let pos = Vec2::new(rand_pos_x, rand_pos_y);
             let radius = 3.0;
-            let scale = 2.0;
+            let mut scale = 2.0;
 
             // 1. RESERVE ID (Critical for correct linking)
             let id = world.reserve_entity();
@@ -419,6 +422,26 @@ impl Engine {
             // 2. Prepare Masks
             let mut signal_mask = SignalMask::default();
             signal_mask.set(BIT_BOUNDING_VOLUME, true);
+            let model;
+            if (i % 300) == 0 {
+                signal_mask.set(BIT_OCCLUDE, true);
+                model = Model {
+                    r: 200,
+                    g: 0,
+                    b: 0,
+                    a: 100,
+                };
+                scale = scale * 3.0;
+            } else
+            {
+                model =  Model {
+                    r: 0,
+                    g: 200,
+                    b: 0,
+                    a: 100,
+                };
+            }
+            occlude = !occlude;
             let layer_mask = SignalMask::default();
 
             // 3. Create Emitter (Sphere Factory)
@@ -435,7 +458,7 @@ impl Engine {
             let signal = Signal {
                 origin: pos,
                 unit_direction: Vec2::new(0.0, 0.0), // Rotation (irrelevant for sphere)
-                outer_radius: radius,           // Outer Radius
+                outer_radius: radius,                // Outer Radius
                 inner_radius: 0.0,
                 angle_radians: angle, // Cone Angle: 2*PI (Full Sphere)
                 emit_mask: signal_mask,
@@ -449,6 +472,9 @@ impl Engine {
             world.spawn_at(
                 id,
                 (
+                    Label {
+                        name: format!("dummy_{}", i),
+                    },
                     Transform {
                         position: pos,
                         scale: scale,
@@ -458,12 +484,7 @@ impl Engine {
                         linear: Vec2::new(rand_vel_x, rand_vel_y),
                         ..Velocity::default()
                     },
-                    Model {
-                        r: 0,
-                        g: 200,
-                        b: 0,
-                        a: 100,
-                    },
+                    model,
                     emitter, // <--- Attached immediately
                 ),
             );
