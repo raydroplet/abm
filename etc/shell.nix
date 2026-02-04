@@ -5,6 +5,11 @@ pkgs.mkShell {
     pkg-config
     wayland
     libxkbcommon
+
+    # Audio backends
+    alsa-lib
+    libpulseaudio
+    pipewire
   ];
 
 shellHook = ''

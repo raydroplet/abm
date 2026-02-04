@@ -1,7 +1,9 @@
 // components.rs
 
-use crate::wave::{LevelMask, SignalMask};
+use crate::wave::{Mask};
 use glam::Vec2;
+use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
+use hecs::{Entity};
 
 #[derive(Default, Clone, Copy, Debug)]
 pub struct Transform {
@@ -22,8 +24,8 @@ impl Transform {
 
 #[derive(Default)]
 pub struct Velocity {
-    pub linear: Vec2, // Meters per second
-                      // pub angular: f32, // Radians per second (rotation speed)
+    pub linear: Vec2,
+    // pub angular: f32, // Radians per second (rotation speed)
 }
 
 pub struct Model {
@@ -35,46 +37,14 @@ pub struct Model {
 
 #[derive(Default, Clone, Copy, Debug)]
 pub struct SignalEmitter {
-    // shape
     pub radius_min: f32,
     pub radius_max: f32,
     pub cone_angle: f32, // 90 degrees = PI/2
-    // pub rotation: f32, // 0.0 = Right, PI/2 = Up, PI = Left.
-    // properties
-    // pub signal_mask: SignalMask,
-    pub layer_mask: LevelMask,
     //
-    pub emit_mask: SignalMask,
-    pub sense_mask: SignalMask,
+    // pub layer_mask: Mask,
+    pub emit_mask: Mask,
+    pub sense_mask: Mask,
 }
-
-// impl SignalEmitter {
-// pub fn emit(field: &mut SignalField, origin: Vec2, /* direction_radians: f32, */ outer_radius: f32, inner_radius: f32, cone_angle_radians: f32, signal_mask: SignalMask, layer_mask: SignalMask, entity: hecs::Entity) -> Self {
-//     let direction_unit = Vec2::new(direction_radians.cos(), direction_radians.sin());
-//     let signal = Signal {
-//         origin: origin,
-//         direction: direction_unit,
-//         outer_radius: outer_radius,
-//         inner_radius: inner_radius,
-//         angle_cos: (cone_angle_radians * 0.5).cos(),
-//         // intensity: ,
-//         // falloff: ,
-//         mask: signal_mask,
-//         entity: entity,
-//     };
-//
-//     let key = field.emit(signal);
-//
-//     Self {
-//         key: key,
-//         radius: outer_radius,
-//         cone_angle: cone_angle_radians, // Default to 360 (Omni)
-//         // rotation: direction_radians,
-//         signal_mask: signal_mask,
-//         layer_mask: layer_mask,
-//
-//     }
-// }
 
 // Points to parent
 #[derive(Debug, Clone, Copy)]
@@ -99,4 +69,16 @@ pub struct Camera {
     // pub level_mask: LevelMask,
     // pub signal_mask: SignalMask,
     // pub zoom: f32,
+}
+
+// kira will keep the audio playing in the background even if there are no entities listenting
+// this engine aspect, and many others, can be a source of optimization, but for now it's fine
+pub struct AudioSource {
+    pub sound_data: StaticSoundData,
+    pub handle: Option<StaticSoundHandle>, // Concrete type
+    pub base_volume: f32,
+}
+
+pub struct AudioListener {
+    pub last_active_sources: Vec<Entity>,
 }

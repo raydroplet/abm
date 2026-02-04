@@ -1,12 +1,14 @@
 // engine.rs
 
 use crate::components::*;
-use crate::wave::{LevelMask, Signal, SignalField, SignalMask};
+use crate::wave::{Mask, Signal, SignalField};
 use bitvec::prelude::*;
 use hecs::Entity;
 
 use glam::Vec2;
 use hecs::World;
+use kira::sound::static_sound::{StaticSoundData, StaticSoundSettings};
+use kira::{AudioManager, AudioManagerSettings, DefaultBackend, Tween};
 use rand::Rng;
 use rustc_hash::FxHashMap;
 use std::f32::consts::TAU;
@@ -16,6 +18,7 @@ const FIXED_DT: f32 = 1.0 / 100.0; // Run physics exactly 100 times a second
 const BIT_BOUNDING_VOLUME: usize = 0;
 const BIT_OCCLUDE: usize = 1;
 const BIT_COLLIDER: usize = 2;
+const BIT_AUDIO: usize = 3;
 
 #[derive(Clone, Copy, Debug)]
 pub struct AgentRenderData {
@@ -32,7 +35,7 @@ pub struct DebugInfo {
     pub render_time_ms: f32, // Render time
     pub tick_time_ms: f32,   //
     //
-    pub active_levels_mask: LevelMask,
+    pub active_levels_mask: Mask,
 }
 
 #[derive(Copy, Clone)]
@@ -81,6 +84,8 @@ pub struct Engine {
     selected_entity: Entity,
     camera_entity: Entity,
     viewport_size: Vec2,
+    //
+    audio_manager: AudioManager<DefaultBackend>,
 }
 
 impl Engine {
@@ -92,7 +97,12 @@ impl Engine {
 
         let camera_id = Self::spawn_camera(width, height, &mut world, &mut signal_field);
         Self::spawn_dummy_entities(width, height, &mut world, &mut signal_field);
+        Self::spawn_audio_sources(width, height, &mut world, &mut signal_field);
         let (player_id, player_vision_id) = Self::spawn_dummy_player(&mut world, &mut signal_field);
+
+        // kira audio manager
+        let manager = AudioManager::<DefaultBackend>::new(AudioManagerSettings::default())
+            .expect("Failed to inialize kira audio manager");
 
         Self {
             world,
@@ -102,8 +112,9 @@ impl Engine {
             last_tick_time_ms: 0.0,
             signal_field, // Store the layer
             camera_entity: camera_id,
-            selected_entity: player_vision_id,
+            selected_entity: player_id,
             viewport_size: Vec2::new(width, height),
+            audio_manager: manager,
         }
     }
 
@@ -131,17 +142,11 @@ impl Engine {
     pub fn tick_once(&mut self) {
         let tick_start = Instant::now();
 
-        // 1. System: Viewport-Based Physics (Movement & Collision)
-        self.system_physics_bounce_on_edges();
-
-        // 2. Simple collision physics
         self.system_physics_collisions();
+        self.system_physics_bounce_on_edges();
+        self.system_sync_spatial();
+        self.system_audio_render();
 
-        // 3. System: Spatial Sync (Hierarchy Propagation)
-        // ParentPos + AnchorOffset -> ChildPos
-        Self::system_sync_spatial(&mut self.world);
-
-        // 4. System: Signal Field Sync
         // Updates the Universal Field Engine with new physical positions
         for (id, (xform, emitter)) in self.world.query_mut::<(&Transform, &SignalEmitter)>() {
             self.signal_field
@@ -240,10 +245,130 @@ impl Engine {
                     // // Slide (Velocity Kill)
                     // let impact = vel.linear.dot(normal);
                     // if impact < 0.0 {
-                    //     vel.linear -= normal * impact;
+                    //     vel.linear *= normal * impact;
                     // }
                 }
             });
+        }
+    }
+
+    fn system_sync_spatial(&self) {
+        let mut buffer = Vec::new(); // not bothering with allocations for now
+
+        // Pass 1: Read & Calc
+        for (child_id, (anchor, _)) in self.world.query::<(&SpatialAnchor, &Transform)>().iter() {
+            if let Ok(parent) = self.world.get::<&Transform>(anchor.parent) {
+                buffer.push((child_id, parent.position + anchor.position_offset));
+            }
+        }
+
+        // Pass 2: Write
+        for (child_id, pos) in buffer.iter() {
+            if let Ok(mut child) = self.world.get::<&mut Transform>(*child_id) {
+                child.position = *pos;
+            }
+        }
+    }
+
+    fn system_audio_render(&mut self) {
+        //
+        let mut query = self.world.query::<(&mut AudioListener, &Transform)>();
+        let (listener_xform, last_active_sources, current_active_sources) = {
+            match query.iter().next() {
+                Some((_entity, (listener, xform))) => {
+                    let last_active_sources = std::mem::take(&mut listener.last_active_sources);
+                    let current_active_sources = &mut listener.last_active_sources;
+
+                    (xform, last_active_sources, current_active_sources)
+                }
+                None => return,
+            }
+        };
+
+        // Scan all audio sources that intersect our listener position
+        let mut mask = Mask::ZERO;
+        mask.set(BIT_AUDIO, true);
+        self.signal_field.scan_point(
+            listener_xform.position,
+            mask,
+            |audio_signal, audio_entity| {
+                // query the audio source component
+                if let Ok(mut query) = self
+                    .world
+                    .query_one::<(&Transform, &SignalEmitter, &mut AudioSource)>(*audio_entity)
+                {
+                    if let Some((source_xform, _, audio_source)) = query.get() {
+                        // A. Mark this entity as "Found"
+                        current_active_sources.push(*audio_entity);
+
+                        // B. Math: Calculate Volume & Pan
+                        let audio_max_radius = audio_signal.outer_radius * source_xform.scale; // Assume pre-scaled
+                        let distance = listener_xform.position.distance(source_xform.position);
+
+                        // Linear attenuation (1.0 at center -> 0.0 at radius)
+                        // 1. Clamp distance so it doesn't exceed the radius (prevents negative volume)
+                        let clamped_dist = distance.min(audio_max_radius);
+
+                        // 2. Calculate ratio: 0.0 (at source) to 1.0 (at max radius)
+                        let distance_ratio = clamped_dist / audio_max_radius;
+
+                        // 3. Invert it: 1.0 (at source) to 0.0 (at max radius)
+                        let volume = (1.0 - distance_ratio) * audio_source.base_volume;
+
+                        // Panning (Dot Product)
+                        let dir =
+                            (source_xform.position - listener_xform.position).normalize_or_zero();
+                        // calculates the right vector of the listener
+                        let (sin, cos) = listener_xform.rotation.sin_cos();
+                        let right = Vec2::new(sin, -cos); // Forward = (cos, sin)
+                        // finally, calculate the pan value
+                        let pan = right.dot(dir);
+
+                        // C. Lifecycle: Spawn or Update
+                        if let Some(handle) = &mut audio_source.handle {
+                            // (Already playing)
+                            let _ = handle.set_volume(volume, Tween::default());
+                            let _ = handle.set_panning(pan, Tween::default());
+                        } else {
+                            // (New sound)
+                            if let Ok(mut handle) =
+                                self.audio_manager.play(audio_source.sound_data.clone())
+                            {
+                                let _ = handle.set_volume(volume, Tween::default());
+                                let _ = handle.set_panning(pan, Tween::default());
+
+                                // Store the handle so we can control it next frame
+                                audio_source.handle = Some(handle);
+                            } else {
+                                eprintln!(
+                                    "Failed to start new sound at tick {}",
+                                    self.tick_counter
+                                );
+                            }
+                        }
+
+                        println!("{:?}: volume {:.2} pan {:.2} |", audio_entity, volume, pan);
+                    }
+                }
+            },
+        );
+
+        // disable sounds that are not in range anymore
+        // this is O(N * M), but supposedly faster than a hashmap for few entities (~ <30)
+        for entity in last_active_sources
+            .iter()
+            .filter(|e| !current_active_sources.contains(e))
+        {
+            // query audio source component
+            if let Ok(mut query) = self.world.query_one::<&mut AudioSource>(*entity) {
+                if let Some(audio_source) = query.get() {
+                    // stop the audio
+                    if let Some(mut handle) = audio_source.handle.take() {
+                        let _ = handle.stop(Tween::default());
+                        // Handle is dropped here, freeing the voice resource.
+                    }
+                }
+            }
         }
     }
 
@@ -263,8 +388,8 @@ impl Engine {
 
         // 2. Spatial Query
         // We only care about agents the camera can actually see
-        let mut signal_mask = SignalMask::default();
-        // let mut layer_mask = SignalMask::default();
+        let mut signal_mask = Mask::default();
+        // let mut layer_mask = Mask::default();
         signal_mask.set(BIT_BOUNDING_VOLUME, true);
         // layer_mask.fill(true);
 
@@ -278,14 +403,15 @@ impl Engine {
             signal_mask,
             // layer_mask,
             |signal, entity| {
-                // if let Ok(model) = self.world.get::<&Model>(*entity) {
-                let data = AgentRenderData {
-                    signal: *signal,
-                    color: [50, 50, 70, 40],
-                    label: None,
-                };
-                to_render.insert(*entity, data);
-                // }
+                if let Ok(model) = self.world.get::<&Model>(*entity) {
+                    let data = AgentRenderData {
+                        signal: *signal,
+                        // color: [50, 50, 70, 40],
+                        color: [model.r / 4, model.g / 4, model.b / 4, 255],
+                        label: None,
+                    };
+                    to_render.insert(*entity, data);
+                }
             },
         );
 
@@ -327,7 +453,7 @@ impl Engine {
 
     fn render_player_vision(
         &self,
-        // layer_mask: SignalMask,
+        // layer_mask: Mask,
         to_render: &mut FxHashMap<hecs::Entity, AgentRenderData>,
     ) {
         // for the selected signal, display signal interactions
@@ -357,7 +483,7 @@ impl Engine {
 
     fn render_player_vision_occluded(
         &self,
-        // layer_mask: LevelMask,
+        // layer_mask: Mask,
         to_render: &mut FxHashMap<hecs::Entity, AgentRenderData>,
     ) {
         // 1. Validate that the selected entity exists and has a SignalEmitter
@@ -412,10 +538,10 @@ impl Engine {
 
         // 2. Prepare Viewport Masks
         // By default, the camera should be able to "see" everything.
-        let mut level_mask = LevelMask::default();
+        let mut level_mask = Mask::default();
         level_mask.fill(true);
 
-        let mut signal_mask = SignalMask::default();
+        let mut signal_mask = Mask::default();
         signal_mask.fill(true);
 
         // 3. Spawn the Camera Entity
@@ -444,7 +570,7 @@ impl Engine {
     ) {
         let mut rng = rand::rng();
 
-        for i in 0..500 {
+        for i in 0..100 {
             // Random Data
             let rand_pos_x = rng.random_range(width / 4.0..(width / 4.0) + (width / 2.0));
             let rand_pos_y = rng.random_range(height / 4.0..(height / 4.0) + (height / 2.0));
@@ -463,7 +589,7 @@ impl Engine {
             let id = world.reserve_entity();
 
             // 2. Prepare Masks
-            let mut signal_mask = SignalMask::default();
+            let mut signal_mask = Mask::default();
             signal_mask.set(BIT_BOUNDING_VOLUME, true);
             signal_mask.set(BIT_COLLIDER, true);
             let model;
@@ -485,7 +611,7 @@ impl Engine {
                     a: 255,
                 };
             }
-            let layer_mask = SignalMask::default();
+            let layer_mask = Mask::default();
 
             // 3. Create Emitter (Sphere Factory)
             let angle = TAU;
@@ -495,7 +621,6 @@ impl Engine {
                 cone_angle: angle,
                 emit_mask: signal_mask,
                 sense_mask: signal_mask,
-                layer_mask: layer_mask,
             };
 
             let signal = Signal {
@@ -540,21 +665,80 @@ impl Engine {
         }
     }
 
-    fn system_sync_spatial(world: &mut World) {
-        let mut buffer = Vec::new(); // not bothering with allocations for now
+    fn spawn_audio_sources(
+        width: f32,
+        height: f32,
+        world: &mut World,
+        signal_field: &mut SignalField,
+    ) {
+        let mut rng = rand::rng();
 
-        // Pass 1: Read & Calc
-        for (child_id, (anchor, _)) in world.query::<(&SpatialAnchor, &Transform)>().iter() {
-            if let Ok(parent) = world.get::<&Transform>(anchor.parent) {
-                buffer.push((child_id, parent.position + anchor.position_offset));
-            }
-        }
+        for i in 0..1 {
+            let rand_pos_x = rng.random_range(width / 4.0..(width / 4.0) + (width / 2.0));
+            let rand_pos_y = rng.random_range(height / 4.0..(height / 4.0) + (height / 2.0));
 
-        // Pass 2: Write
-        for (child_id, pos) in buffer.iter() {
-            if let Ok(mut child) = world.get::<&mut Transform>(*child_id) {
-                child.position = *pos;
-            }
+            let pos = Vec2::new(rand_pos_x, rand_pos_y);
+            let radius = 2.0;
+            let scale = 60.0;
+
+            let id = world.reserve_entity();
+
+            let model = Model {
+                r: 80,
+                g: 80,
+                b: 0,
+                a: 200,
+            };
+
+            let mut signal_mask = Mask::default();
+            signal_mask.set(BIT_BOUNDING_VOLUME, true);
+            signal_mask.set(BIT_AUDIO, true);
+
+            let angle = TAU;
+            let emitter = SignalEmitter {
+                radius_max: radius,
+                radius_min: 0.0,
+                cone_angle: angle,
+                emit_mask: signal_mask,
+                sense_mask: signal_mask,
+            };
+
+            let sound_data = StaticSoundData::from_file("assets/piano_string.wav")
+                .expect("Failed to load sound file");
+
+            let audio = AudioSource {
+                sound_data: sound_data,
+                handle: None,
+                base_volume: 1.0,
+            };
+
+            let signal = Signal {
+                origin: pos,
+                unit_direction: Vec2::new(0.0, 0.0), // Rotation (irrelevant for sphere)
+                outer_radius: radius,                // Outer Radius
+                inner_radius: 0.0,
+                angle_radians: angle, // Cone Angle: 2*PI (Full Sphere)
+                emit_mask: signal_mask,
+                sense_mask: signal_mask,
+            };
+            signal_field.emit(signal, id);
+
+            world.spawn_at(
+                id,
+                (
+                    Label {
+                        name: format!("audio_{}", i),
+                    },
+                    Transform {
+                        position: pos,
+                        scale: scale,
+                        ..Transform::default()
+                    },
+                    model,
+                    emitter,
+                    audio,
+                ),
+            );
         }
     }
 
@@ -567,8 +751,8 @@ impl Engine {
         // =========================================================
         let player_id = world.reserve_entity();
 
-        let mut signal_mask = SignalMask::default();
-        let layer_mask = SignalMask::default();
+        let mut signal_mask = Mask::default();
+        let layer_mask = Mask::default();
         signal_mask.set(BIT_BOUNDING_VOLUME, true);
         signal_mask.set(BIT_COLLIDER, true);
 
@@ -583,7 +767,6 @@ impl Engine {
             cone_angle: cone_angle,
             emit_mask: signal_mask,
             sense_mask: signal_mask,
-            layer_mask: layer_mask,
         };
 
         let player_signal = Signal {
@@ -620,6 +803,9 @@ impl Engine {
                     a: 255,
                 },
                 player_emitter,
+                AudioListener {
+                    last_active_sources: Vec::new(),
+                },
             ),
         );
 
@@ -639,7 +825,6 @@ impl Engine {
             cone_angle: cone_angle,
             emit_mask: signal_mask,
             sense_mask: signal_mask,
-            layer_mask: layer_mask,
         };
 
         let child_signal = Signal {

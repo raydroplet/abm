@@ -308,7 +308,7 @@ impl Presenter {
 
                 let engine_ms = debug_info.render_time_ms;
                 ui.horizontal(|ui| {
-                    ui.label("Engine Render Time:");
+                    ui.label("Render Time:");
                     ui.colored_label(
                         if engine_ms > 5.0 {
                             egui::Color32::KHAKI
@@ -321,7 +321,7 @@ impl Presenter {
 
                 ui.horizontal(|ui| {
                     let phys_ms = debug_info.tick_time_ms;
-                    ui.label("Physics Time:");
+                    ui.label("Tick Time:");
                     ui.colored_label(
                         // If physics takes > 8ms, we are dangerously close to
                         // missing the 10ms deadline (100 ticks/sec)

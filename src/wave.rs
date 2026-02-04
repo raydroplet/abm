@@ -246,41 +246,38 @@ impl SignalField {
     //////////
     /// Scan
 
-    // /// READ: The Scan Loop
-    // pub fn scan_point(
-    //     &self,
-    //     pos: Vec2,
-    //     signal_mask: SignalMask,
-    //     layer_mask: LevelMask,
-    //     mut callback: impl FnMut(&Signal),
-    // ) {
-    //     let scanning = self.active_levels & layer_mask;
-    //
-    //     for level in scanning.iter_ones() {
-    //         // let level = scanning.trailing_zeros() as u8;
-    //         // scanning &= !(1 << level);
-    //
-    //         let cell_size = (1 << level) as f32;
-    //         let grid_x = (pos[0] / cell_size).floor() as i32;
-    //         let grid_y = (pos[1] / cell_size).floor() as i32;
-    //
-    //         if let Some(bucket) = self.grid.get(&TileKey {
-    //             level: level as u8,
-    //             x: grid_x,
-    //             y: grid_y,
-    //         }) {
-    //             for (key, sig_mask) in bucket {
-    //                 if (*sig_mask & signal_mask).any() {
-    //                     if let Some(sig) = self.store.get(key) {
-    //                         if self.check_intersection_point(pos, sig) {
-    //                             callback(sig);
-    //                         }
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }
+    pub fn scan_point(
+        &self,
+        pos: Vec2,
+        signal_mask: SignalMask,
+        mut callback: impl FnMut(&Signal, &hecs::Entity),
+    ) {
+        let scanning = self.active_levels /* & layer_mask */;
+
+        for level in scanning.iter_ones() {
+            let (min_g, max_g) = Self::get_tile_range(pos, pos, level);
+
+            for gx in min_g.x..max_g.x {
+                for gy in min_g.y..max_g.y {
+                    if let Some(bucket) = self.grid.get(&TileKey {
+                        level: level as u8,
+                        x: gx,
+                        y: gy,
+                    }) {
+                        for (key, sig_mask) in bucket {
+                            if (*sig_mask & signal_mask).any() {
+                                if let Some(sig) = self.store.get(key) {
+                                    if self.check_intersection_point_circle(pos, sig) {
+                                        callback(sig, key);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     pub fn scan_range(
         &self,
@@ -472,38 +469,16 @@ impl SignalField {
     //         && dist_sq >= (sig.inner_radius * sig.inner_radius)
     // }
 
-    // fn check_intersection_point(&self, target_pos: Vec2, sig: &Signal) -> bool {
-    //     let to_target = target_pos - sig.origin;
-    //
-    //     // 1. Calculate Squared Distance (Cheap: x*x + y*y)
-    //     let dist_sq = to_target.length_squared();
-    //
-    //     // 2. Early Radius Check (Cheap)
-    //     if dist_sq > sig.outer_radius * sig.outer_radius {
-    //         return false;
-    //     }
-    //
-    //     // 3. Dot Product (Un-normalized)
-    //     let dot = sig.direction.dot(to_target);
-    //
-    //     // 4. "Behind" Check
-    //     // If dot is negative, the target is behind us.
-    //     // Unless you have >180 FOV, this is an instant fail.
-    //     if dot < 0.0 {
-    //         return false;
-    //     }
-    //
-    //     // 5. Check
-    //     // Instead of: dot / sqrt(dist_sq) > angle_cos
-    //     // We use:     dot * dot > angle_cos * angle_cos * dist_sq
-    //     let threshold_sq = sig.angle_cos * sig.angle_cos * dist_sq;
-    //
-    //     if dot * dot < threshold_sq {
-    //         return false;
-    //     }
-    //
-    //     true
-    // }
+    pub fn check_intersection_point_circle(&self, point: Vec2, target_circle: &Signal) -> bool {
+        // 1. Calculate squared distance (glam handles the x/y math for you)
+        let dist_sq = point.distance_squared(target_circle.origin);
+
+        // 2. Squared radius
+        let radius_sq = target_circle.outer_radius * target_circle.outer_radius;
+
+        // 3. Compare
+        dist_sq <= radius_sq
+    }
 
     // NOTE: fully implemented by hand. you may as well not go into the trouble of touching it again
     pub fn check_intersection_arc_circle(
@@ -625,7 +600,6 @@ impl SignalField {
 
         false
     }
-
 
     // WARN: untested
     fn project_shadow(view: &Signal, target: &Signal) -> ShadowMask {
