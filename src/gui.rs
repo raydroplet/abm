@@ -642,8 +642,8 @@ impl Presenter {
     }
 
     fn render_agents(painter: &egui::Painter, frame: &FrameData) {
-        let stroke_color = egui::Color32::from_rgba_unmultiplied(200, 200, 200, 155);
-        let stroke_width = 0.0;
+        let stroke_color = egui::Color32::from_rgba_unmultiplied(120, 120, 120, 135);
+        let stroke_width = 0.3;
         //
         let viewport = painter.clip_rect();
         let camera = &frame.camera_xform;
@@ -824,7 +824,7 @@ impl Presenter {
             // Get the grid tile indices from the engine
             let (min_g, max_g) = SignalField::get_tile_range(min_aabb, max_aabb, selected_level);
 
-            let highlight_color = egui::Color32::from_rgba_unmultiplied(63, 81, 111, 55);
+            let highlight_color = egui::Color32::from_rgba_unmultiplied(81, 81, 81, 35);
 
             for gx in min_g.x..max_g.x {
                 for gy in min_g.y..max_g.y {
@@ -850,7 +850,7 @@ impl Presenter {
         }
 
         // --- WIREFRAME RENDERING ---
-        let grid_color = egui::Color32::from_rgba_unmultiplied(63, 81, 181, 40);
+        let grid_color = egui::Color32::from_rgba_unmultiplied(31, 31, 31, 80);
         let stroke = egui::Stroke::new(1.0, grid_color);
 
         // Find where the World (0,0) point is currently located on your monitor
@@ -1015,7 +1015,7 @@ impl eframe::App for Presenter {
 
             // Render loop (Modifies frame.inspection_view)
             egui::CentralPanel::default()
-                .frame(egui::Frame::new().fill(egui::Color32::from_rgb(10, 10, 15)))
+                .frame(egui::Frame::new().fill(egui::Color32::from_rgb(0, 0, 0)))
                 .show(ctx, |ui| {
                     let painter = ui.painter();
                     // Self::render_waves(painter, frame);

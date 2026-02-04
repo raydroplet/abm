@@ -20,6 +20,7 @@ type CommonBitArray = BitArray<[u64; N]>;
 pub type ShadowMask = CommonBitArray;
 pub type SignalMask = CommonBitArray;
 pub type LevelMask = CommonBitArray;
+pub type Mask = CommonBitArray;
 //
 pub type Bucket = SmallVec<[(SignalKey, SignalMask); 4]>; // The Bucket: A list of (ID, Mask) tuples
 pub type SpatialGrid = FxHashMap<TileKey, Bucket>; // The Grid: Map of Coordinates -> Bucket
@@ -286,10 +287,10 @@ impl SignalField {
         min: Vec2,
         max: Vec2,
         query_mask: SignalMask,
-        layer_mask: LevelMask,
+        // layer_mask: LevelMask,
         mut callback: impl FnMut(&Signal, &hecs::Entity),
     ) {
-        let scanning = self.active_levels & layer_mask;
+        let scanning = self.active_levels/*  & layer_mask */;
 
         for level in scanning.iter_ones() {
             let (min_g, max_g) = Self::get_tile_range(min, max, level);
@@ -319,10 +320,10 @@ impl SignalField {
     pub fn scan<'a>(
         &'a self,
         key: SignalKey,
-        layer_mask: LevelMask,
+        // layer_mask: LevelMask,
         mut callback: impl FnMut(&'a Signal, SignalKey),
     ) {
-        let scanning = self.active_levels & layer_mask;
+        let scanning = self.active_levels/*  & layer_mask */;
         let signal = self.store.get(&key).expect("Invalid key");
 
         // 1. BROAD PHASE: Calculate a loose Bounding Box
@@ -362,8 +363,8 @@ impl SignalField {
     pub fn scan_occluded<'a>(
         &'a self,
         key: SignalKey,
-        layer_mask: LevelMask,
-        occlusion_mask: LevelMask,
+        // layer_mask: LevelMask,
+        occlusion_mask: Mask,
         mut callback: impl FnMut(&Signal, SignalKey, ShadowMask),
     ) {
         let view = self.store.get(&key).expect("Invalid key");
@@ -376,7 +377,7 @@ impl SignalField {
         };
 
         // scan all signals in the view
-        self.scan(key, layer_mask, scan_callback);
+        self.scan(key, /* layer_mask, */ scan_callback);
 
         // Sort everything by distance (closest first).
         signal_buffer
@@ -403,7 +404,7 @@ impl SignalField {
 
             // early exit on full occlusion
             if shadow_mask.all() {
-                println!("shadow_mask.all()");
+                // println!("shadow_mask.all()");
                 break;
             }
         }
@@ -678,7 +679,7 @@ impl SignalField {
         let coverage = target.outer_radius / to_target.length().max(1e-5);
 
         if coverage >= 1.0 {
-            println!("coverage {} >= 1", coverage);
+            // println!("coverage {} >= 1", coverage);
             let mut mask = ShadowMask::ZERO;
             mask.fill(true);
             return mask;

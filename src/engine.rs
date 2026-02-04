@@ -15,6 +15,7 @@ use std::time::Instant; // or f64::consts::TAU
 const FIXED_DT: f32 = 1.0 / 100.0; // Run physics exactly 100 times a second
 const BIT_BOUNDING_VOLUME: usize = 0;
 const BIT_OCCLUDE: usize = 1;
+const BIT_COLLIDER: usize = 2;
 
 #[derive(Clone, Copy, Debug)]
 pub struct AgentRenderData {
@@ -101,7 +102,7 @@ impl Engine {
             last_tick_time_ms: 0.0,
             signal_field, // Store the layer
             camera_entity: camera_id,
-            selected_entity: camera_id,
+            selected_entity: player_vision_id,
             viewport_size: Vec2::new(width, height),
         }
     }
@@ -131,26 +132,29 @@ impl Engine {
         let tick_start = Instant::now();
 
         // 1. System: Viewport-Based Physics (Movement & Collision)
-        self.system_viewport_based_physics();
+        self.system_physics_bounce_on_edges();
 
-        // 2. System: Spatial Sync (Hierarchy Propagation)
+        // 2. Simple collision physics
+        self.system_physics_collisions();
+
+        // 3. System: Spatial Sync (Hierarchy Propagation)
         // ParentPos + AnchorOffset -> ChildPos
         Self::system_sync_spatial(&mut self.world);
 
-        // 3. System: Signal Field Sync
+        // 4. System: Signal Field Sync
         // Updates the Universal Field Engine with new physical positions
         for (id, (xform, emitter)) in self.world.query_mut::<(&Transform, &SignalEmitter)>() {
             self.signal_field
                 .reposition(id, xform.position, emitter.radius_max * xform.scale);
         }
 
-        // 4. Update Counters & Metrics
+        // 5. Update Counters & Metrics
         self.tick_counter += 1;
         self.last_tick_time_ms = tick_start.elapsed().as_secs_f32() * 1000.0;
     }
 
     /// Extracted movement logic to be called within tick_once
-    fn system_viewport_based_physics(&mut self) {
+    fn system_physics_bounce_on_edges(&mut self) {
         // Determine edges (clipping your movement to the current camera view)
         let (left, right, top, bottom) = {
             let query = self.world.query_one::<&Transform>(self.camera_entity).ok();
@@ -206,6 +210,43 @@ impl Engine {
         }
     }
 
+    fn system_physics_collisions(&mut self) {
+        for (id, (xform, vel, emitter)) in
+            self.world
+                .query_mut::<(&mut Transform, &mut Velocity, &mut SignalEmitter)>()
+        {
+            let my_radius = emitter.radius_max * xform.scale;
+            self.signal_field.scan(id, |signal, key| {
+                if signal.emit_mask[BIT_COLLIDER] {
+                    // self check
+                    if id == key {
+                        return;
+                    }
+
+                    // A. Calculate Vector from Them -> To Me
+                    let delta = xform.position - signal.origin;
+                    // We need 'dist' to normalize the vector (direction)
+                    // We need 'dist' to calculate 'overlap' (strength)
+                    let dist = delta.length_squared().sqrt();
+
+                    //
+                    let normal = delta / dist.max(0.0001);
+                    let combined_radius = my_radius + signal.outer_radius;
+                    let overlap = combined_radius - dist;
+
+                    // Push
+                    xform.position += normal * overlap * 0.5;
+
+                    // // Slide (Velocity Kill)
+                    // let impact = vel.linear.dot(normal);
+                    // if impact < 0.0 {
+                    //     vel.linear -= normal * impact;
+                    // }
+                }
+            });
+        }
+    }
+
     pub fn render(&self, frame: &mut FrameData) {
         let start_render = Instant::now();
 
@@ -223,9 +264,9 @@ impl Engine {
         // 2. Spatial Query
         // We only care about agents the camera can actually see
         let mut signal_mask = SignalMask::default();
-        let mut layer_mask = SignalMask::default();
+        // let mut layer_mask = SignalMask::default();
         signal_mask.set(BIT_BOUNDING_VOLUME, true);
-        layer_mask.fill(true);
+        // layer_mask.fill(true);
 
         frame.agents.clear();
         let mut to_render: FxHashMap<hecs::Entity, AgentRenderData> = FxHashMap::default();
@@ -235,12 +276,12 @@ impl Engine {
             xform.position - ((self.viewport_size / 2.0) * xform.scale),
             xform.position + ((self.viewport_size / 2.0) * xform.scale),
             signal_mask,
-            layer_mask,
+            // layer_mask,
             |signal, entity| {
                 // if let Ok(model) = self.world.get::<&Model>(*entity) {
                 let data = AgentRenderData {
                     signal: *signal,
-                    color: [100, 100, 120, 40],
+                    color: [50, 50, 70, 40],
                     label: None,
                 };
                 to_render.insert(*entity, data);
@@ -248,8 +289,8 @@ impl Engine {
             },
         );
 
-        // self.render_player_vision(layer_mask, &mut to_render);
-        self.render_player_vision_occluded(layer_mask, &mut to_render);
+        // self.render_player_vision(/* layer_mask,  */&mut to_render);
+        self.render_player_vision_occluded(/* layer_mask, */ &mut to_render);
         frame.agents.extend(to_render.into_values());
 
         // 3. Metadata
@@ -286,7 +327,7 @@ impl Engine {
 
     fn render_player_vision(
         &self,
-        layer_mask: SignalMask,
+        // layer_mask: SignalMask,
         to_render: &mut FxHashMap<hecs::Entity, AgentRenderData>,
     ) {
         // for the selected signal, display signal interactions
@@ -295,8 +336,10 @@ impl Engine {
             .get::<&SignalEmitter>(self.selected_entity)
             .is_ok()
         {
-            self.signal_field
-                .scan(self.selected_entity, layer_mask, |signal, entity| {
+            self.signal_field.scan(
+                self.selected_entity,
+                /* layer_mask, */
+                |signal, entity| {
                     if let Ok(mut query) = self.world.query_one::<&Model>(entity) {
                         if let Some(model) = query.get() {
                             let data = AgentRenderData {
@@ -307,13 +350,14 @@ impl Engine {
                             to_render.insert(entity, data);
                         }
                     }
-                });
+                },
+            );
         }
     }
 
     fn render_player_vision_occluded(
         &self,
-        layer_mask: LevelMask,
+        // layer_mask: LevelMask,
         to_render: &mut FxHashMap<hecs::Entity, AgentRenderData>,
     ) {
         // 1. Validate that the selected entity exists and has a SignalEmitter
@@ -330,7 +374,7 @@ impl Engine {
             // This will sort tiles and signals front-to-back to calculate shadows
             self.signal_field.scan_occluded(
                 self.selected_entity,
-                layer_mask,
+                // layer_mask,
                 occlusion_mask,
                 |signal, entity, visible_bits| {
                     // 3. Only process if the entity has a Model component to render
@@ -400,10 +444,10 @@ impl Engine {
     ) {
         let mut rng = rand::rng();
 
-        for i in 0..3000 {
+        for i in 0..500 {
             // Random Data
-            let rand_pos_x = rng.random_range(width/4.0..(width/4.0)+(width/2.0));
-            let rand_pos_y = rng.random_range(height/4.0..(height/4.0)+(height/2.0));
+            let rand_pos_x = rng.random_range(width / 4.0..(width / 4.0) + (width / 2.0));
+            let rand_pos_y = rng.random_range(height / 4.0..(height / 4.0) + (height / 2.0));
             let rand_vel_x = rng.random_range(-100.0..100.0);
             let rand_vel_y = rng.random_range(-100.0..100.0);
             // let r_val = rng.random_range(0..=255);
@@ -421,23 +465,24 @@ impl Engine {
             // 2. Prepare Masks
             let mut signal_mask = SignalMask::default();
             signal_mask.set(BIT_BOUNDING_VOLUME, true);
+            signal_mask.set(BIT_COLLIDER, true);
             let model;
             let occlude = (i % 300) == 0;
             if occlude {
                 signal_mask.set(BIT_OCCLUDE, true);
                 model = Model {
-                    r: 200,
-                    g: 0,
-                    b: 0,
-                    a: 100,
+                    r: 150,
+                    g: 20,
+                    b: 20,
+                    a: 255,
                 };
                 scale = scale * 3.0;
             } else {
                 model = Model {
-                    r: 0,
-                    g: 200,
-                    b: 0,
-                    a: 100,
+                    r: 20,
+                    g: 150,
+                    b: 20,
+                    a: 255,
                 };
             }
             let layer_mask = SignalMask::default();
@@ -470,9 +515,9 @@ impl Engine {
             world.spawn_at(
                 id,
                 (
-                    Label {
-                        name: format!("dummy_{}", i),
-                    },
+                    // Label {
+                    //     name: format!("dummy_{}", i),
+                    // },
                     Transform {
                         position: pos,
                         scale: scale,
@@ -483,7 +528,7 @@ impl Engine {
                 ),
             );
 
-            if occlude {
+            if !occlude {
                 let _ = world.insert_one(
                     id,
                     Velocity {
@@ -513,112 +558,6 @@ impl Engine {
         }
     }
 
-    // fn system_viewport_based_physics(&mut self) {
-    //     // 1. Fetch camera transform
-    //     let mut query = self
-    //         .world
-    //         .query_one::<&Transform>(self.camera_entity)
-    //         .expect("Camera missing");
-    //     let xform = query.get().expect("Transform missing");
-    //
-    //     // 2. Calculate the aspect ratio of the physical window
-    //     let aspect = self.viewport_size.x / self.viewport_size.y;
-    //
-    //     // 3. Use your internal_res variable as the baseline
-    //     // 'internal_res.y' is our 768.0, 1080.0, etc.
-    //     let visible_height = self.viewport_size.y * xform.scale;
-    //
-    //     // 4. Derive the width based on the aspect ratio
-    //     let visible_width = visible_height * aspect;
-    //
-    //     // 5. Calculate the bounding box for collision
-    //     let half_w = visible_width / 2.0;
-    //     let half_h = visible_height / 2.0;
-    //
-    //     let left_edge = xform.position.x - half_w;
-    //     let right_edge = xform.position.x + half_w;
-    //     let top_edge = xform.position.y - half_h;
-    //     let bottom_edge = xform.position.y + half_h;
-    //     drop(query);
-    //
-    //     // SPIRAL OF DEATH PROTECTION:
-    //     // If the game lags hard (0.25s freeze), don't try to catch up
-    //     // by running 15 physics steps instantly. Just cap it.
-    //     //
-    //     // the logic inside the while loop is currently too fast for this to happen,
-    //     // but it will stay here in case of future needs
-    //     if self.time_accumulator > 0.25 {
-    //         println!("heavy processing. slowing time down!");
-    //         self.time_accumulator = 0.25;
-    //     }
-    //
-    //     while self.time_accumulator >= FIXED_DT {
-    //         let tick_time = Instant::now();
-    //
-    //         // 1. MOVEMENT LOOP (Updates Position)
-    //         // We now query for Anchor optionally.
-    //         // This lets us differentiate between Roots and Children.
-    //         for (_id, (xform, vel, anchor_opt)) in
-    //             self.world
-    //                 .query_mut::<(&mut Transform, &mut Velocity, Option<&mut SpatialAnchor>)>()
-    //         {
-    //             // handles local vs global positions
-    //             match anchor_opt {
-    //                 Some(anchor) => {
-    //                     // the sync system will update the transform world position latter
-    //                     anchor.position_offset += vel.linear * FIXED_DT;
-    //
-    //                     // Note: We skip world-bounds collision for children.
-    //                     // They stick to their parents even if the parent drags them through a wall.
-    //                 }
-    //                 None => {
-    //                     xform.position += vel.linear * FIXED_DT;
-    //
-    //                     // Horizontal Collision (Visible Edges)
-    //                     if xform.position.x >= right_edge {
-    //                         vel.linear.x = -vel.linear.x.abs(); // Ensure it moves Left
-    //                         xform.position.x = right_edge;
-    //                     } else if xform.position.x <= left_edge {
-    //                         vel.linear.x = vel.linear.x.abs(); // Ensure it moves Right
-    //                         xform.position.x = left_edge;
-    //                     }
-    //
-    //                     // Vertical Collision (Visible Edges)
-    //                     if xform.position.y >= bottom_edge {
-    //                         vel.linear.y = -vel.linear.y.abs(); // Ensure it moves Up
-    //                         xform.position.y = bottom_edge;
-    //                     } else if xform.position.y <= top_edge {
-    //                         vel.linear.y = vel.linear.y.abs(); // Ensure it moves Down
-    //                         xform.position.y = top_edge;
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //         // 2. SPATIAL SYNC (The Cache Refresh)
-    //         // This propagates ParentPos + AnchorOffset -> ChildPos
-    //         // It ensures the Transform is correct before we use it for Signals/Rendering.
-    //         Self::system_sync_spatial(&mut self.world);
-    //
-    //         // 2. SIGNAL SYNC LOOP (Updates SignalLayer)
-    //         // We iterate over entities that have BOTH Position and Emitter
-    //         for (id, (xform, emitter)) in self.world.query_mut::<(&Transform, &SignalEmitter)>() {
-    //             // Reposition the signal to match the agent
-    //             // We split the borrow here: 'pos' is from 'world', 'reposition' is on 'signal_layer'
-    //             self.signal_field.reposition(
-    //                 id,
-    //                 xform.position,
-    //                 // emitter.radius_min * xform.scale, // Keep the radius constant (or pulse it here!)
-    //                 emitter.radius_max * xform.scale, // Keep the radius constant (or pulse it here!)
-    //             );
-    //         }
-    //
-    //         self.time_accumulator -= FIXED_DT;
-    //         self.tick_counter += 1;
-    //
-    //         self.last_tick_time_ms = tick_time.elapsed().as_secs_f32() * 1000.0;
-    //     }
-    // }
-
     fn spawn_dummy_player(world: &mut World, signal_field: &mut SignalField) -> (Entity, Entity) {
         let player_pos = Vec2::new(512.0, 384.0);
         let player_scale = 20.0;
@@ -631,6 +570,7 @@ impl Engine {
         let mut signal_mask = SignalMask::default();
         let layer_mask = SignalMask::default();
         signal_mask.set(BIT_BOUNDING_VOLUME, true);
+        signal_mask.set(BIT_COLLIDER, true);
 
         let outer_rad = 1.0;
         let inner_rad = 0.0;
@@ -675,9 +615,9 @@ impl Engine {
                 // },
                 Model {
                     r: 000,
-                    g: 200,
+                    g: 100,
                     b: 000,
-                    a: 100,
+                    a: 255,
                 },
                 player_emitter,
             ),
@@ -687,9 +627,10 @@ impl Engine {
         // 2. THE CHILD SCANNER (Omni Sensor)
         // =========================================================
         let player_vision_id = world.reserve_entity();
-        let scanner_range = 1.0;
+        let scanner_range = 2.0;
         let scale = 200.0;
-        let cone_angle = TAU / 8.0;
+        let cone_angle = TAU /* / 8.0 */;
+        signal_mask.set(BIT_COLLIDER, false);
 
         // Component
         let child_emitter = SignalEmitter {
