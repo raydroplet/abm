@@ -12,6 +12,7 @@ use kira::{AudioManager, AudioManagerSettings, DefaultBackend, Tween};
 use rand::Rng;
 use rustc_hash::FxHashMap;
 use std::f32::consts::TAU;
+use std::time::Duration;
 use std::time::Instant; // or f64::consts::TAU
 
 const FIXED_DT: f32 = 1.0 / 100.0; // Run physics exactly 100 times a second
@@ -95,14 +96,14 @@ impl Engine {
         let width = 1024.0;
         let height = 768.0;
 
+        // kira audio manager
+        let mut manager = AudioManager::<DefaultBackend>::new(AudioManagerSettings::default())
+            .expect("Failed to inialize kira audio manager");
+
         let camera_id = Self::spawn_camera(width, height, &mut world, &mut signal_field);
         Self::spawn_dummy_entities(width, height, &mut world, &mut signal_field);
-        Self::spawn_audio_sources(width, height, &mut world, &mut signal_field);
+        Self::spawn_audio_sources(width, height, &mut world, &mut manager, &mut signal_field);
         let (player_id, player_vision_id) = Self::spawn_dummy_player(&mut world, &mut signal_field);
-
-        // kira audio manager
-        let manager = AudioManager::<DefaultBackend>::new(AudioManagerSettings::default())
-            .expect("Failed to inialize kira audio manager");
 
         Self {
             world,
@@ -288,32 +289,38 @@ impl Engine {
         // Scan all audio sources that intersect our listener position
         let mut mask = Mask::ZERO;
         mask.set(BIT_AUDIO, true);
+
+        let tween = Tween {
+            duration: Duration::from_millis(30), // ~2 frames at 60fps
+            ..Default::default()
+        };
+
         self.signal_field.scan_point(
             listener_xform.position,
             mask,
             |audio_signal, audio_entity| {
                 // query the audio source component
-                if let Ok(mut query) = self
-                    .world
-                    .query_one::<(&Transform, &SignalEmitter, &mut AudioSource)>(*audio_entity)
+                if let Ok(mut query) =
+                    self.world
+                        .query_one::<(&Transform, &SignalEmitter, &mut AudioSourcePersistent)>(
+                            *audio_entity,
+                        )
                 {
                     if let Some((source_xform, _, audio_source)) = query.get() {
                         // A. Mark this entity as "Found"
                         current_active_sources.push(*audio_entity);
 
                         // B. Math: Calculate Volume & Pan
-                        let audio_max_radius = audio_signal.outer_radius * source_xform.scale; // Assume pre-scaled
+                        let audio_max_radius = audio_signal.outer_radius;
                         let distance = listener_xform.position.distance(source_xform.position);
-
-                        // Linear attenuation (1.0 at center -> 0.0 at radius)
-                        // 1. Clamp distance so it doesn't exceed the radius (prevents negative volume)
-                        let clamped_dist = distance.min(audio_max_radius);
-
-                        // 2. Calculate ratio: 0.0 (at source) to 1.0 (at max radius)
-                        let distance_ratio = clamped_dist / audio_max_radius;
-
-                        // 3. Invert it: 1.0 (at source) to 0.0 (at max radius)
-                        let volume = (1.0 - distance_ratio) * audio_source.base_volume;
+                        let attenuation = distance / audio_max_radius;
+                        let volume = 10.0 + (attenuation * -30.0);
+                        println!(
+                            "(distance / audio_max_radius) -> {} / {} => {}",
+                            distance,
+                            audio_max_radius,
+                            distance / audio_max_radius
+                        );
 
                         // Panning (Dot Product)
                         let dir =
@@ -324,30 +331,11 @@ impl Engine {
                         // finally, calculate the pan value
                         let pan = right.dot(dir);
 
-                        // C. Lifecycle: Spawn or Update
-                        if let Some(handle) = &mut audio_source.handle {
-                            // (Already playing)
-                            let _ = handle.set_volume(volume, Tween::default());
-                            let _ = handle.set_panning(pan, Tween::default());
-                        } else {
-                            // (New sound)
-                            if let Ok(mut handle) =
-                                self.audio_manager.play(audio_source.sound_data.clone())
-                            {
-                                let _ = handle.set_volume(volume, Tween::default());
-                                let _ = handle.set_panning(pan, Tween::default());
-
-                                // Store the handle so we can control it next frame
-                                audio_source.handle = Some(handle);
-                            } else {
-                                eprintln!(
-                                    "Failed to start new sound at tick {}",
-                                    self.tick_counter
-                                );
-                            }
-                        }
-
-                        println!("{:?}: volume {:.2} pan {:.2} |", audio_entity, volume, pan);
+                        // (Already playing)
+                        let _ = audio_source.handle.set_volume(volume, tween);
+                        let _ = audio_source.handle.set_panning(pan, tween);
+                        println!("{:?}: volume {:.2}", audio_entity, volume);
+                        //
                     }
                 }
             },
@@ -360,13 +348,13 @@ impl Engine {
             .filter(|e| !current_active_sources.contains(e))
         {
             // query audio source component
-            if let Ok(mut query) = self.world.query_one::<&mut AudioSource>(*entity) {
+            if let Ok(mut query) = self.world.query_one::<&mut AudioSourcePersistent>(*entity) {
                 if let Some(audio_source) = query.get() {
                     // stop the audio
-                    if let Some(mut handle) = audio_source.handle.take() {
-                        let _ = handle.stop(Tween::default());
-                        // Handle is dropped here, freeing the voice resource.
-                    }
+                    let _ = audio_source.handle.set_volume(-100.0, tween);
+                    println!("{:?}: volume {:.2}", *entity, -100.0);
+                    // let _ = handle.stop(Tween::default());
+                    // Handle is dropped here, freeing the voice resource.
                 }
             }
         }
@@ -669,6 +657,7 @@ impl Engine {
         width: f32,
         height: f32,
         world: &mut World,
+        audio_manager: &mut AudioManager,
         signal_field: &mut SignalField,
     ) {
         let mut rng = rand::rng();
@@ -703,12 +692,18 @@ impl Engine {
                 sense_mask: signal_mask,
             };
 
-            let sound_data = StaticSoundData::from_file("assets/piano_string.wav")
-                .expect("Failed to load sound file");
+            let sound_data = StaticSoundData::from_file("assets/raining_loop.flac")
+                .expect("Failed to load audio file")
+                .volume(-100.0);
 
-            let audio = AudioSource {
+            // 3. Play it
+            let handle = audio_manager
+                .play(sound_data.clone())
+                .expect("Failed to play audio");
+
+            let audio = AudioSourcePersistent {
                 sound_data: sound_data,
-                handle: None,
+                handle: handle,
                 base_volume: 1.0,
             };
 

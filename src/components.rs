@@ -73,10 +73,13 @@ pub struct Camera {
 
 // kira will keep the audio playing in the background even if there are no entities listenting
 // this engine aspect, and many others, can be a source of optimization, but for now it's fine
-pub struct AudioSource {
+pub struct AudioSourcePersistent {
     pub sound_data: StaticSoundData,
-    pub handle: Option<StaticSoundHandle>, // Concrete type
+    pub handle: StaticSoundHandle,
     pub base_volume: f32,
+}
+
+pub struct AudioSourceTransient {
 }
 
 pub struct AudioListener {
