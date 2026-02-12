@@ -3,48 +3,30 @@
 use bitvec::prelude::*;
 use glam::{IVec2, Mat2, Vec2};
 use rustc_hash::FxHashMap;
-// use slotmap::{SlotMap, new_key_type};
 use smallvec::SmallVec;
-// use std::f32::consts::FRAC_PI_2;
-// use std::f32::consts::PI;
-
-// ==================================================================================
-// 1. DATA STRUCTURES
-// ==================================================================================
 
 const LEVEL_COUNT: usize = 64;
-const N: usize = 1;
 pub type LevelCount = [u32; LEVEL_COUNT];
-//
-type CommonBitArray = BitArray<[u64; N]>;
-pub type ShadowMask = CommonBitArray;
-pub type SignalMask = CommonBitArray;
-pub type LevelMask = CommonBitArray;
-pub type Mask = CommonBitArray;
-//
-pub type Bucket = SmallVec<[(SignalKey, SignalMask); 4]>; // The Bucket: A list of (ID, Mask) tuples
+pub type Mask = BitArray<[u64; 1]>;
+pub type Bucket = SmallVec<[(SignalKey, Mask); 4]>; // The Bucket: A list of (ID, Mask) tuples
 pub type SpatialGrid = FxHashMap<TileKey, Bucket>; // The Grid: Map of Coordinates -> Bucket
 
 // new_key_type! { pub struct SignalKey; }
-// can be swapped for u64 latter and use entity.to_bits() to avoid coupling with hecs
-// it is used here for convenience and to remember what they key should actually be
+// can be swapped for u64 + entity.to_bits() latter to avoid coupling with hecs
+// kept like this for convenience and to remember what they key should actually be
 pub type SignalKey = hecs::Entity; // we will just use the generational hecs::Entity as the key
 
-// level: how big is the tile? are we looking at a 1km square or a 1m square?
-// x,y: grid positions for this tile
-//
 #[derive(Hash, PartialEq, Eq, Clone, Copy, Debug)]
 pub struct TileKey {
+    // how big is the tile? are we looking at a 1km square or a 1m square?
     level: u8,
+    // x, y: grid positions for this tile
     x: i32,
     y: i32,
 }
 
-// CONST GENERIC SIGNAL
-// N = Number of BYTES (u8).
-// Signal<10> = 10 bytes = 80 bits.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Signal<const N: usize = 1> {
+pub struct Signal {
     // source
     pub origin: Vec2, // !!!
     pub unit_direction: Vec2,
@@ -56,29 +38,9 @@ pub struct Signal<const N: usize = 1> {
     // pub intensity: f32, // How strong?
     // pub falloff: f32,   // How fast it fades?
     // data
-    pub emit_mask: SignalMask,
-    pub sense_mask: SignalMask,
+    pub emit_mask: Mask,
+    pub sense_mask: Mask,
 }
-//
-// impl Signal {
-//     pub fn new_sphere(origin: Vec2, radius: f32, mask: SignalMask, entity: Entity) -> Self {
-//         Self {
-//             origin,
-//             direction: Vec2::X,
-//             outer_radius: radius,
-//             inner_radius: 0.0,
-//             angle_cos: -1.0,
-//             // intensity: 1.0,
-//             // falloff: 0.1,
-//             mask: mask,
-//             // entity: entity,
-//         }
-//     }
-// }
-
-// ==================================================================================
-// 2. THE SYSTEM
-// ==================================================================================
 
 pub struct SignalField {
     // pub store: SlotMap<SignalKey, Signal>,
@@ -93,7 +55,7 @@ pub struct SignalField {
     //
     grid: SpatialGrid,
 
-    active_levels: LevelMask,
+    active_levels: Mask,
     level_counts: LevelCount,
 }
 
@@ -103,7 +65,7 @@ impl SignalField {
             // store: SlotMap::with_key(),
             store: FxHashMap::default(),
             grid: FxHashMap::default(),
-            active_levels: LevelMask::default(),
+            active_levels: Mask::default(),
             level_counts: [0; LEVEL_COUNT],
         }
     }
@@ -249,7 +211,7 @@ impl SignalField {
     pub fn scan_point(
         &self,
         pos: Vec2,
-        signal_mask: SignalMask,
+        signal_mask: Mask,
         mut callback: impl FnMut(&Signal, &hecs::Entity),
     ) {
         let scanning = self.active_levels /* & layer_mask */;
@@ -283,8 +245,8 @@ impl SignalField {
         &self,
         min: Vec2,
         max: Vec2,
-        query_mask: SignalMask,
-        // layer_mask: LevelMask,
+        query_mask: Mask,
+        // layer_mask: Mask,
         mut callback: impl FnMut(&Signal, &hecs::Entity),
     ) {
         let scanning = self.active_levels/*  & layer_mask */;
@@ -317,7 +279,7 @@ impl SignalField {
     pub fn scan<'a>(
         &'a self,
         key: SignalKey,
-        // layer_mask: LevelMask,
+        // layer_mask: Mask,
         mut callback: impl FnMut(&'a Signal, SignalKey),
     ) {
         let scanning = self.active_levels/*  & layer_mask */;
@@ -360,9 +322,9 @@ impl SignalField {
     pub fn scan_occluded<'a>(
         &'a self,
         key: SignalKey,
-        // layer_mask: LevelMask,
+        // layer_mask: Mask,
         occlusion_mask: Mask,
-        mut callback: impl FnMut(&Signal, SignalKey, ShadowMask),
+        mut callback: impl FnMut(&Signal, SignalKey, Mask),
     ) {
         let view = self.store.get(&key).expect("Invalid key");
         let mut signal_buffer = SmallVec::<[(&'a Signal, SignalKey, f32); 64]>::new();
@@ -381,7 +343,7 @@ impl SignalField {
             .sort_unstable_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
 
         // projection and occlusion
-        let mut shadow_mask: ShadowMask = BitArray::ZERO;
+        let mut shadow_mask: Mask = BitArray::ZERO;
         for (target, key, _distance) in signal_buffer {
             let target_projection = Self::project_shadow(view, target);
             let visible_bits = target_projection & !shadow_mask;
@@ -412,7 +374,7 @@ impl SignalField {
 
     fn internal_remove(
         grid: &mut SpatialGrid,
-        active_levels: &mut LevelMask,
+        active_levels: &mut Mask,
         level_counts: &mut LevelCount,
         key: SignalKey,
         outer_radius: f32,
@@ -443,7 +405,7 @@ impl SignalField {
 
     fn internal_add(
         grid: &mut SpatialGrid,
-        active_levels: &mut LevelMask,
+        active_levels: &mut Mask,
         level_counts: &mut LevelCount,
         key: SignalKey,
         signal: &Signal,
@@ -602,7 +564,7 @@ impl SignalField {
     }
 
     // WARN: untested
-    fn project_shadow(view: &Signal, target: &Signal) -> ShadowMask {
+    fn project_shadow(view: &Signal, target: &Signal) -> Mask {
         // 1. define the vector from the viewer to the target.
         let to_target = target.origin - view.origin;
 
@@ -654,7 +616,7 @@ impl SignalField {
 
         if coverage >= 1.0 {
             // println!("coverage {} >= 1", coverage);
-            let mut mask = ShadowMask::ZERO;
+            let mut mask = Mask::ZERO;
             mask.fill(true);
             return mask;
         }
@@ -736,7 +698,7 @@ impl SignalField {
 
     ////////////////////////////////////////////////////////////////////////////////////////
 
-    pub fn get_level_mask(&self) -> LevelMask {
+    pub fn get_level_mask(&self) -> Mask {
         self.active_levels
     }
 }

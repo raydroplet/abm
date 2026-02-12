@@ -16,10 +16,11 @@ use std::time::Duration;
 use std::time::Instant; // or f64::consts::TAU
 
 const FIXED_DT: f32 = 1.0 / 100.0; // Run physics exactly 100 times a second
+const BIT_AUDIO: usize = 3;
+
 const BIT_BOUNDING_VOLUME: usize = 0;
 const BIT_OCCLUDE: usize = 1;
 const BIT_COLLIDER: usize = 2;
-const BIT_AUDIO: usize = 3;
 
 #[derive(Clone, Copy, Debug)]
 pub struct AgentRenderData {
@@ -314,7 +315,7 @@ impl Engine {
                         let audio_max_radius = audio_signal.outer_radius;
                         let distance = listener_xform.position.distance(source_xform.position);
                         let attenuation = distance / audio_max_radius;
-                        let volume = 10.0 + (attenuation * -30.0);
+                        let volume = audio_source.base_volume + (attenuation * -30.0);
                         println!(
                             "(distance / audio_max_radius) -> {} / {} => {}",
                             distance,
@@ -382,7 +383,7 @@ impl Engine {
         // layer_mask.fill(true);
 
         frame.agents.clear();
-        let mut to_render: FxHashMap<hecs::Entity, AgentRenderData> = FxHashMap::default();
+        let mut to_render: FxHashMap<(hecs::Entity, Mask), AgentRenderData> = FxHashMap::default();
 
         // ghost entities
         self.signal_field.scan_range(
@@ -398,14 +399,34 @@ impl Engine {
                         color: [model.r / 4, model.g / 4, model.b / 4, 255],
                         label: None,
                     };
-                    to_render.insert(*entity, data);
+                    to_render.insert((*entity, signal.emit_mask), data);
                 }
             },
         );
-
         // self.render_player_vision(/* layer_mask,  */&mut to_render);
         self.render_player_vision_occluded(/* layer_mask, */ &mut to_render);
-        frame.agents.extend(to_render.into_values());
+
+        // quick z buffer sorting hack
+        // 1. Collect everything into a temporary Vec so we can access the Mask (in the key)
+        // entries type is Vec<((Entity, Mask), AgentRenderData)>
+        let mut entries: Vec<_> = to_render.into_iter().collect();
+
+        // 2. Sort: Audio masks (true) come before non-audio (false)
+        entries.sort_unstable_by(|((_, mask_a), _), ((_, mask_b), _)| {
+            // Check if the 3rd bit is set (assuming 1 << 3)
+            let a_has_audio = mask_a[BIT_AUDIO];
+            let b_has_audio = mask_b[BIT_AUDIO];
+
+            // Use b.cmp(a) so 'true' sorts before 'false'
+            b_has_audio.cmp(&a_has_audio)
+        });
+
+        // 3. Drop the keys (Entity, Mask) and extend your frame agents
+        frame
+            .agents
+            .extend(entries.into_iter().map(|(_, data)| data));
+
+        // frame.agents.extend(to_render.into_values());
 
         // 3. Metadata
         frame.debug_info.tick_counter = self.tick_counter;
@@ -472,7 +493,7 @@ impl Engine {
     fn render_player_vision_occluded(
         &self,
         // layer_mask: Mask,
-        to_render: &mut FxHashMap<hecs::Entity, AgentRenderData>,
+        to_render: &mut FxHashMap<(hecs::Entity, Mask), AgentRenderData>,
     ) {
         // 1. Validate that the selected entity exists and has a SignalEmitter
 
@@ -504,7 +525,7 @@ impl Engine {
                             };
 
                             i += 1;
-                            to_render.insert(entity, data);
+                            to_render.insert((entity, signal.emit_mask), data);
                         }
                     }
                 },
@@ -649,6 +670,13 @@ impl Engine {
                         ..Velocity::default()
                     },
                 );
+            } else {
+                let _ = world.insert_one(
+                    id,
+                    Label {
+                        name: format!("occluder_{}", i),
+                    },
+                );
             }
         }
     }
@@ -673,10 +701,10 @@ impl Engine {
             let id = world.reserve_entity();
 
             let model = Model {
-                r: 80,
-                g: 80,
+                r: 180,
+                g: 180,
                 b: 0,
-                a: 200,
+                a: 100,
             };
 
             let mut signal_mask = Mask::default();
@@ -702,9 +730,9 @@ impl Engine {
                 .expect("Failed to play audio");
 
             let audio = AudioSourcePersistent {
-                sound_data: sound_data,
+                // sound_data: sound_data,
                 handle: handle,
-                base_volume: 1.0,
+                base_volume: 10.0,
             };
 
             let signal = Signal {
@@ -785,7 +813,7 @@ impl Engine {
                 Transform {
                     position: player_pos,
                     scale: player_scale,
-                    rotation: 0.0,
+                    rotation: TAU / 4.0,
                 },
                 // Velocity {
                 //     linear: Vec2::new(100.0, 100.0),
@@ -809,8 +837,8 @@ impl Engine {
         // =========================================================
         let player_vision_id = world.reserve_entity();
         let scanner_range = 2.0;
-        let scale = 200.0;
-        let cone_angle = TAU /* / 8.0 */;
+        let scale = 30.0;
+        let cone_angle = TAU / 8.0;
         signal_mask.set(BIT_COLLIDER, false);
 
         // Component

@@ -4,6 +4,7 @@ use crate::wave::{Mask};
 use glam::Vec2;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
 use hecs::{Entity};
+use std::f32::consts::TAU;
 
 #[derive(Default, Clone, Copy, Debug)]
 pub struct Transform {
@@ -74,7 +75,7 @@ pub struct Camera {
 // kira will keep the audio playing in the background even if there are no entities listenting
 // this engine aspect, and many others, can be a source of optimization, but for now it's fine
 pub struct AudioSourcePersistent {
-    pub sound_data: StaticSoundData,
+    // pub sound_data: StaticSoundData,
     pub handle: StaticSoundHandle,
     pub base_volume: f32,
 }

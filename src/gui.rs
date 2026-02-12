@@ -460,8 +460,11 @@ impl Presenter {
                                 );
                             }
                             ui.label("Y");
-                            let response =
-                                ui.add(egui::DragValue::new(&mut transform.scale).speed(1.0));
+                            let response = ui.add(
+                                egui::DragValue::new(&mut transform.scale)
+                                    .speed(1.0)
+                                    .range(0.1..=f32::MAX),
+                            );
                             if response.changed() {
                                 let _ = command_channel.send(
                                     EngineCommand::UpdateTransform(view.entity, *transform).into(),
@@ -824,7 +827,7 @@ impl Presenter {
             // Get the grid tile indices from the engine
             let (min_g, max_g) = SignalField::get_tile_range(min_aabb, max_aabb, selected_level);
 
-            let highlight_color = egui::Color32::from_rgba_unmultiplied(81, 81, 81, 35);
+            let highlight_color = egui::Color32::from_rgba_unmultiplied(80, 80, 80, 25);
 
             for gx in min_g.x..max_g.x {
                 for gy in min_g.y..max_g.y {
@@ -850,8 +853,8 @@ impl Presenter {
         }
 
         // --- WIREFRAME RENDERING ---
-        let grid_color = egui::Color32::from_rgba_unmultiplied(31, 31, 31, 80);
-        let stroke = egui::Stroke::new(1.0, grid_color);
+        let grid_lines_color = egui::Color32::from_rgba_unmultiplied(31, 31, 31, 80);
+        let stroke = egui::Stroke::new(1.0, grid_lines_color);
 
         // Find where the World (0,0) point is currently located on your monitor
         let world_zero = Self::world_to_screen(glam::Vec2::ZERO, frame, screen_rect);
@@ -1015,7 +1018,7 @@ impl eframe::App for Presenter {
 
             // Render loop (Modifies frame.inspection_view)
             egui::CentralPanel::default()
-                .frame(egui::Frame::new().fill(egui::Color32::from_rgb(0, 0, 0)))
+                .frame(egui::Frame::new().fill(egui::Color32::from_rgb(12, 12, 12)))
                 .show(ctx, |ui| {
                     let painter = ui.painter();
                     // Self::render_waves(painter, frame);
