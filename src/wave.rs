@@ -9,7 +9,6 @@ const LEVEL_COUNT: usize = 64;
 pub type LevelCount = [u32; LEVEL_COUNT];
 pub type Mask = BitArray<[u64; 1]>;
 
-// new_key_type! { pub struct SignalKey; }
 // can be swapped for u64 + entity.to_bits() latter to avoid coupling with hecs
 // kept like this for convenience and to remember what they key should actually be
 pub type SignalKey = hecs::Entity; // we will just use the generational hecs::Entity as the key
@@ -32,9 +31,6 @@ pub struct Signal {
     pub outer_radius: f32,
     pub inner_radius: f32,
     pub angle_radians: f32,
-    // force
-    // pub intensity: f32, // How strong?
-    // pub falloff: f32,   // How fast it fades?
     // data
     pub emit_mask: Mask,
     pub sense_mask: Mask,
@@ -61,10 +57,11 @@ impl SignalField {
 
     pub fn emit(&mut self, signal: Signal, key: SignalKey) {
         let tile_key = Self::get_coordinates(signal.outer_radius, signal.origin);
-        self.add_into_grid(key, &tile_key, signal.emit_mask);
+        self.insert_into_grid(key, &tile_key, signal.emit_mask);
         self.store.insert(key, signal);
     }
 
+    // WARN: untested
     pub fn cease(&mut self, key: SignalKey) {
         if let Some(signal) = self.store.get(&key) {
             let tile_key = Self::get_coordinates(signal.outer_radius, signal.origin);
@@ -80,43 +77,38 @@ impl SignalField {
 
     pub fn reposition(&mut self, key: SignalKey, new_pos: Vec2, outer_radius: f32) {
         let signal = if let Some(signal) = self.store.get_mut(&key) {
-            println!("reposition {:?}", key);
             signal
         } else {
             eprintln!("Failed to reposition. Invalid signal key");
             return;
         };
 
-        // calculate the spatial hash for where it is vs where it wants to be
+        // calculate  where it is and where it wants to be
         let old_tile = Self::get_coordinates(signal.outer_radius, signal.origin);
         let new_tile = Self::get_coordinates(outer_radius, new_pos);
 
-        // if the agent moved, but didn't cross a grid boundary,
-        // we only update the raw data in 'store'
+        // update with new size/position in the 'store' (using the reference:w
+        signal.outer_radius = outer_radius;
+        signal.origin = new_pos;
+
+        // if the entity moved, but didn't cross a grid boundary, we are done
         if old_tile == new_tile {
-            signal.origin = new_pos;
-            signal.outer_radius = outer_radius;
             return;
         }
 
+        // copy some data for the following functions
+        let emit_mask = signal.emit_mask;
+
         // clone the signal, since we are going to (re)move it from its old tile
-        let mut signal = signal.clone();
         self.remove_from_grid(
             key,
             &old_tile,
         );
 
-        // update with new size/position
-        signal.outer_radius = outer_radius;
-        signal.origin = new_pos;
-
-        // add to grid
-        let tile_key = Self::get_coordinates(signal.outer_radius, signal.origin);
-        self.add_into_grid(key, &tile_key, signal.emit_mask);
+        // add to grid (into its new tile)
+        self.insert_into_grid(key, &new_tile, emit_mask);
     }
 
-    /// Updates the facing direction and field-of-view of a signal.
-    /// This is O(1) as it does not require updating the spatial grid.
     pub fn reshape(
         &mut self,
         key: SignalKey,
@@ -125,23 +117,12 @@ impl SignalField {
         inner_radius: f32,
     ) {
         if let Some(signal) = self.store.get_mut(&key) {
-            // 1. Update Direction
-            // We convert the angle back into a normalized Vec2
             let (sin, cos) = new_direction_radians.sin_cos();
             signal.unit_direction = Vec2::new(cos, sin);
-
-            // 2. Update Aperture (Cone Angle)
-            // We assume 'aperture' is the Full Angle (e.g., 90 degrees).
-            // The dot product check requires the cosine of the Half Angle.
-            //
-            // Example:
             signal.angle_radians = new_angle_radians;
             signal.inner_radius = inner_radius;
         }
     }
-
-    //////////
-    /// Scan
 
     pub fn scan_point(
         &self,
@@ -181,7 +162,6 @@ impl SignalField {
         min: Vec2,
         max: Vec2,
         query_mask: Mask,
-        // layer_mask: Mask,
         mut callback: impl FnMut(&Signal, &hecs::Entity),
     ) {
         let scanning = self.active_levels/*  & layer_mask */;
@@ -198,7 +178,6 @@ impl SignalField {
                         y: gy,
                     }) {
                         for (key, sig_mask) in bucket {
-                            // Quick Mask Filter
                             if (*sig_mask & query_mask).any() {
                                 if let Some(sig) = self.store.get(key) {
                                     callback(sig, key);
@@ -220,11 +199,13 @@ impl SignalField {
         let scanning = self.active_levels/*  & layer_mask */;
         let signal = self.store.get(&key).expect("Invalid key");
 
-        // 1. BROAD PHASE: Calculate a loose Bounding Box
-        // Optimizing the AABB of a rotated cone is hard.
-        // query the square AABB of the full (circle) radius.
+        // broad phase: calculate a loose bounding box
+        //
+        // optimizing the aabb of a rotated cone is more expensive.
+        // instead query the square AABB of the full (circle) radius.
         // It over-selects tiles, the Narrow Phase filters them out.
         // A better bounding box algorithm may benefit in high range scenarios.
+        //
         let min_aabb = signal.origin - Vec2::splat(signal.outer_radius);
         let max_aabb = signal.origin + Vec2::splat(signal.outer_radius);
 
@@ -241,7 +222,6 @@ impl SignalField {
                         for (key, sig_mask) in bucket {
                             if (*sig_mask & signal.sense_mask).any() {
                                 if let Some(target) = self.store.get(key) {
-                                    // 2. NARROW PHASE: Cone vs Circle Intersection
                                     if self.check_intersection_arc_circle(signal, target) {
                                         callback(target, *key);
                                     }
@@ -257,7 +237,6 @@ impl SignalField {
     pub fn scan_occluded<'a>(
         &'a self,
         key: SignalKey,
-        // layer_mask: Mask,
         occlusion_mask: Mask,
         mut callback: impl FnMut(&Signal, SignalKey, Mask),
     ) {
@@ -271,7 +250,7 @@ impl SignalField {
         };
 
         // scan all signals in the view
-        self.scan(key, /* layer_mask, */ scan_callback);
+        self.scan(key, scan_callback);
 
         // Sort everything by distance (closest first).
         signal_buffer
@@ -298,14 +277,10 @@ impl SignalField {
 
             // early exit on full occlusion
             if shadow_mask.all() {
-                // println!("shadow_mask.all()");
                 break;
             }
         }
     }
-
-    //=================
-    // PRIVATE HELPERS
 
     fn remove_from_grid(&mut self, key: SignalKey, tile_key: &TileKey) {
         let level = tile_key.level as usize;
@@ -330,7 +305,7 @@ impl SignalField {
         }
     }
 
-    fn add_into_grid(&mut self, key: SignalKey, tile_key: &TileKey, emit_mask: Mask) {
+    fn insert_into_grid(&mut self, key: SignalKey, tile_key: &TileKey, emit_mask: Mask) {
         let level = tile_key.level as usize;
 
         // bitmask && counter
@@ -476,7 +451,7 @@ impl SignalField {
         false
     }
 
-    // WARN: untested
+    // NOTE: works, by (rendered) visual assertion
     fn project_shadow(view: &Signal, target: &Signal) -> Mask {
         // 1. define the vector from the viewer to the target.
         let to_target = target.origin - view.origin;
@@ -559,12 +534,12 @@ impl SignalField {
     fn get_coordinates(outer_radius: f32, origin: Vec2) -> TileKey {
         let level = Self::get_level(outer_radius);
 
-        // 1. Calculate the actual size of a cell at this level
-        // level 0 = 1.0, level 1 = 2.0, level 2 = 4.0, etc.
+        // calculate the actual size of a cell at this level
+        // level 0 = 1.0, level 1 = 2.0, level 2 = 4.0, etc
         let cell_size = (1u64 << level) as f32;
 
-        // 2. Divide by cell_size and floor to find the grid index
-        // .floor() is critical to handle negative coordinates correctly!
+        // divide by cell_size and floor to find the grid index
+        // .floor() is critical to handle negative coordinates correctly
         let gx = (origin.x / cell_size).floor() as i32;
         let gy = (origin.y / cell_size).floor() as i32;
 
@@ -575,14 +550,10 @@ impl SignalField {
         }
     }
 
-    ////////////////////////////////////////////////////////////////////////////////////////
-
-    /// Returns the (min, max) grid coordinates as IVec2s for the given AABB and level.
-    /// Includes the 1-tile padding for broad-phase safety.
     pub fn get_tile_range(min_aabb: Vec2, max_aabb: Vec2, level: usize) -> (IVec2, IVec2) {
         let cell_size = Self::get_level_size(level);
 
-        // Use floor to ensure consistent behavior in negative coordinates
+        // also includes the 1-tile padding for broad-phase safety.
         let min_g = (min_aabb / cell_size).floor().as_ivec2() - IVec2::ONE;
         let max_g = (max_aabb / cell_size).ceil().as_ivec2() + IVec2::ONE;
 
@@ -590,8 +561,8 @@ impl SignalField {
         (min_g, max_g)
     }
 
-    /// Returns the level of the smallest tile that can fit
-    /// 8 circles of this radius arranged in a 2x2 grid.
+    // returns the level of the smallest tile that can fit
+    // 8 circles of this radius arranged in a 2x2 grid.
     pub fn get_level(radius: f32) -> usize {
         // The required tile diameter is 4 times the radius.
         let required_width = radius * 4.0;
@@ -608,8 +579,6 @@ impl SignalField {
     pub fn get_level_size(level: usize) -> f32 {
         (2.0_f32).powi(level as i32)
     }
-
-    ////////////////////////////////////////////////////////////////////////////////////////
 
     pub fn get_level_mask(&self) -> Mask {
         self.active_levels

@@ -114,7 +114,7 @@ impl Engine {
             last_tick_time_ms: 0.0,
             signal_field, // Store the layer
             camera_entity: camera_id,
-            selected_entity: player_id,
+            selected_entity: camera_id,
             viewport_size: Vec2::new(width, height),
             audio_manager: manager,
         }
@@ -561,7 +561,7 @@ impl Engine {
             Transform {
                 position: center,
                 rotation: 0.0,
-                scale: 0.5, // Camera scale usually represents a zoom multiplier
+                scale: 1.0, // Camera scale usually represents a zoom multiplier
             },
             Camera {
                 // level_mask,
@@ -579,7 +579,7 @@ impl Engine {
     ) {
         let mut rng = rand::rng();
 
-        for i in 0..1 {
+        for i in 0..1000 {
             // Random Data
             let rand_pos_x = rng.random_range(width / 4.0..(width / 4.0) + (width / 2.0));
             let rand_pos_y = rng.random_range(height / 4.0..(height / 4.0) + (height / 2.0));
