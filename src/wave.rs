@@ -8,8 +8,6 @@ use smallvec::SmallVec;
 const LEVEL_COUNT: usize = 64;
 pub type LevelCount = [u32; LEVEL_COUNT];
 pub type Mask = BitArray<[u64; 1]>;
-pub type Bucket = SmallVec<[(SignalKey, Mask); 4]>; // The Bucket: A list of (ID, Mask) tuples
-pub type SpatialGrid = FxHashMap<TileKey, Bucket>; // The Grid: Map of Coordinates -> Bucket
 
 // new_key_type! { pub struct SignalKey; }
 // can be swapped for u64 + entity.to_bits() latter to avoid coupling with hecs
@@ -42,19 +40,11 @@ pub struct Signal {
     pub sense_mask: Mask,
 }
 
+type Bucket = SmallVec<[(SignalKey, Mask); 4]>;
+
 pub struct SignalField {
-    // pub store: SlotMap<SignalKey, Signal>,
-    pub store: FxHashMap<SignalKey, Signal>,
-
-    // Mask stored as bytes
-    // stores signal identifiers (SignalKey) for a specific tile (TileKey)
-    //
-    // the value includes the SignalType for filtering the
-    // ones the agent querying cares about, without having
-    // to lookup (memory acess) the actual Signal struct
-    //
-    grid: SpatialGrid,
-
+    store: FxHashMap<SignalKey, Signal>, // NOTE: use nohash-hasher, keys are always unique
+    grid: FxHashMap<TileKey, Bucket>,
     active_levels: Mask,
     level_counts: LevelCount,
 }
@@ -62,7 +52,6 @@ pub struct SignalField {
 impl SignalField {
     pub fn new() -> Self {
         Self {
-            // store: SlotMap::with_key(),
             store: FxHashMap::default(),
             grid: FxHashMap::default(),
             active_levels: Mask::default(),
@@ -70,114 +59,60 @@ impl SignalField {
         }
     }
 
-    // =========================================================================
-    // PUBLIC API
-    // =========================================================================
-
-    /// CREATE: Generates a NEW Key
     pub fn emit(&mut self, signal: Signal, key: SignalKey) {
-        // 1. Destructure Self (Split Borrows)
-        let Self {
-            store,
-            grid,
-            active_levels,
-            level_counts,
-            ..
-        } = self;
-
-        Self::internal_add(grid, active_levels, level_counts, key, &signal);
-        store.insert(key, signal);
+        let tile_key = Self::get_coordinates(signal.outer_radius, signal.origin);
+        self.add_into_grid(key, &tile_key, signal.emit_mask);
+        self.store.insert(key, signal);
     }
 
-    /// DELETE: Removes existing Key
     pub fn cease(&mut self, key: SignalKey) {
-        // 1. Destructure Self
-        // We don't need active_levels for removal
-        let Self {
-            store,
-            grid,
-            active_levels,
-            level_counts,
-            ..
-        } = self;
-
-        // 2. Look up the signal to see where it was
-        if let Some(sig) = store.get(&key) {
-            // 3. Remove from Grid (Using specific fields, not the whole struct)
-            // matching the signature of internal_remove(grid, key, radius, origin)
-            Self::internal_remove(
-                grid,
-                active_levels,
-                level_counts,
+        if let Some(signal) = self.store.get(&key) {
+            let tile_key = Self::get_coordinates(signal.outer_radius, signal.origin);
+            self.remove_from_grid(
                 key,
-                sig.outer_radius,
-                sig.origin,
+                &tile_key,
             );
         }
 
-        // 4. Finally remove from storage
-        store.remove(&key);
+        // remove from storage
+        self.store.remove(&key);
     }
 
-    /// updates Position and radius
     pub fn reposition(&mut self, key: SignalKey, new_pos: Vec2, outer_radius: f32) {
-        // 1. SPLIT SELF
-        let Self {
-            store,
-            grid,
-            active_levels,
-            level_counts,
-            ..
-        } = self;
-
-        // 2. Get the signal (Mutable Borrow of STORE)
-        let signal = if let Some(sig) = store.get_mut(&key) {
-            sig
+        let signal = if let Some(signal) = self.store.get_mut(&key) {
+            println!("reposition {:?}", key);
+            signal
         } else {
+            eprintln!("Failed to reposition. Invalid signal key");
             return;
         };
 
-        // insanely efficient for high agent count
-        // ---------------------------------------------------------------------
-        // OPTIMIZATION START
-        // ---------------------------------------------------------------------
-
-        // Calculate the Spatial Hash for where it IS vs where it WANTS TO BE
+        // calculate the spatial hash for where it is vs where it wants to be
         let old_tile = Self::get_coordinates(signal.outer_radius, signal.origin);
         let new_tile = Self::get_coordinates(outer_radius, new_pos);
 
-        // If the agent moved, but didn't cross a grid boundary, we skip the HashMap thrashing.
-        // The Grid points to the SignalKey, and the SignalKey is still valid.
-        // We only update the raw data in 'store'.
+        // if the agent moved, but didn't cross a grid boundary,
+        // we only update the raw data in 'store'
         if old_tile == new_tile {
             signal.origin = new_pos;
             signal.outer_radius = outer_radius;
             return;
         }
 
-        // ---------------------------------------------------------------------
-        // OPTIMIZATION END (Fallback to Slow Path)
-        // ---------------------------------------------------------------------
-
-        // 3. Remove from OLD grid using OLD coordinates (derived from signal data before update)
-        // We manually reproduce the logic of internal_remove to avoid borrow checker wars,
-        // or just call it if arguments align (they do).
-        Self::internal_remove(
-            grid,
-            active_levels,
-            level_counts,
+        // clone the signal, since we are going to (re)move it from its old tile
+        let mut signal = signal.clone();
+        self.remove_from_grid(
             key,
-            signal.outer_radius, // Pass OLD radius
-            signal.origin,       // Pass OLD origin
+            &old_tile,
         );
 
-        // 4. Update the Signal (In Place)
-        signal.origin = new_pos;
+        // update with new size/position
         signal.outer_radius = outer_radius;
+        signal.origin = new_pos;
 
-        // 5. Add to NEW grid
-        // internal_add calculates the key based on the *current* signal state, which we just updated.
-        Self::internal_add(grid, active_levels, level_counts, key, signal);
+        // add to grid
+        let tile_key = Self::get_coordinates(signal.outer_radius, signal.origin);
+        self.add_into_grid(key, &tile_key, signal.emit_mask);
     }
 
     /// Updates the facing direction and field-of-view of a signal.
@@ -372,64 +307,42 @@ impl SignalField {
     //=================
     // PRIVATE HELPERS
 
-    fn internal_remove(
-        grid: &mut SpatialGrid,
-        active_levels: &mut Mask,
-        level_counts: &mut LevelCount,
-        key: SignalKey,
-        outer_radius: f32,
-        origin: Vec2,
-    ) {
-        let tile_key = Self::get_coordinates(outer_radius, origin);
+    fn remove_from_grid(&mut self, key: SignalKey, tile_key: &TileKey) {
         let level = tile_key.level as usize;
 
-        if let Some(bucket) = grid.get_mut(&tile_key) {
+        if let Some(bucket) = self.grid.get_mut(&tile_key) {
             if let Some(idx) = bucket.iter().position(|(k, _)| *k == key) {
                 bucket.swap_remove(idx);
 
                 // 1. Decrement Counter
-                level_counts[level] = level_counts[level].saturating_sub(1);
+                self.level_counts[level] = self.level_counts[level].saturating_sub(1);
 
                 // 2. If level is now empty, flip the bit to 0
-                if level_counts[level] == 0 {
-                    active_levels.set(level, false);
+                if self.level_counts[level] == 0 {
+                    self.active_levels.set(level, false);
                 }
             }
 
             // Cleanup empty bucket to prevent Hashmap bloat
             if bucket.is_empty() {
-                grid.remove(&tile_key);
+                self.grid.remove(&tile_key);
             }
         }
     }
 
-    fn internal_add(
-        grid: &mut SpatialGrid,
-        active_levels: &mut Mask,
-        level_counts: &mut LevelCount,
-        key: SignalKey,
-        signal: &Signal,
-    ) {
-        let tile_key = Self::get_coordinates(signal.outer_radius, signal.origin);
+    fn add_into_grid(&mut self, key: SignalKey, tile_key: &TileKey, emit_mask: Mask) {
         let level = tile_key.level as usize;
 
-        // 1. Update Bitmask & Counter
-        active_levels.set(level, true);
-        level_counts[level] += 1;
+        // bitmask && counter
+        self.active_levels.set(level, true);
+        self.level_counts[level] += 1;
 
-        // 2. Insert into Grid
-        grid.entry(tile_key)
+        // insert into grid
+        self.grid
+            .entry(*tile_key)
             .or_default()
-            .push((key, signal.emit_mask));
+            .push((key, emit_mask));
     }
-
-    // fn check_collision_hollow_sphere(&self, pos: Vec2, sig: &Signal) -> bool {
-    //     let dx = pos[0] - sig.origin.x;
-    //     let dy = pos[1] - sig.origin.y;
-    //     let dist_sq = dx * dx + dy * dy;
-    //     dist_sq <= (sig.outer_radius * sig.outer_radius)
-    //         && dist_sq >= (sig.inner_radius * sig.inner_radius)
-    // }
 
     pub fn check_intersection_point_circle(&self, point: Vec2, target_circle: &Signal) -> bool {
         // 1. Calculate squared distance (glam handles the x/y math for you)

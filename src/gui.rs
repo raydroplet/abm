@@ -2,7 +2,7 @@
 
 use crate::components::Transform;
 use crate::engine::{DebugInfo, Engine, EngineCommand, FrameData, InspectionData};
-use crate::wave::{LevelMask, SignalField};
+use crate::wave::{Mask, SignalField};
 
 pub use crossbeam_channel as crossbeam;
 pub use eframe::egui;
@@ -556,7 +556,7 @@ impl Presenter {
 
                     ui.separator();
 
-                    let mut mask = LevelMask::ZERO;
+                    let mut mask = Mask::ZERO;
                     egui::CollapsingHeader::new("Masks")
                         .default_open(false)
                         .show(ui, |ui| {
@@ -587,7 +587,7 @@ impl Presenter {
         }
     }
 
-    fn bitgrid_widget(ui: &mut egui::Ui, mask: &mut LevelMask) {
+    fn bitgrid_widget(ui: &mut egui::Ui, mask: &mut Mask) {
         let block_size = 16.0;
         let gap = 2.0;
         let grid_dim = 8;

@@ -579,7 +579,7 @@ impl Engine {
     ) {
         let mut rng = rand::rng();
 
-        for i in 0..100 {
+        for i in 0..1 {
             // Random Data
             let rand_pos_x = rng.random_range(width / 4.0..(width / 4.0) + (width / 2.0));
             let rand_pos_y = rng.random_range(height / 4.0..(height / 4.0) + (height / 2.0));
