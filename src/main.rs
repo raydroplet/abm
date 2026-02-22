@@ -1,13 +1,14 @@
 // main.rs
+mod components;
+mod view_egui;
+mod engine;
 mod gui;
 mod wave;
-mod engine;
-mod components;
 
+use crate::engine::Engine;
 use gui::{Presenter, Producer, crossbeam};
-use crate::engine::{Engine};
 
-fn main() -> eframe::Result<()> {
+fn main() {
     // 1. Channels (Capacity 2 is a sweet spot for double buffering)
     // - producer_tx: Engine fills this
     // - presenter_rx: Presenter reads this
@@ -22,7 +23,7 @@ fn main() -> eframe::Result<()> {
 
     // 2. Setup Classes
     let engine = Engine::new();
-    let producer = Producer::new(producer_rx, producer_tx , command_rx);
+    let producer = Producer::new(producer_rx, producer_tx, command_rx);
     let presenter = Presenter::new(presenter_rx, presenter_tx, command_tx);
 
     // 3. Execution

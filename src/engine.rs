@@ -70,6 +70,24 @@ pub struct FrameData {
     pub inspection_entities: Vec<(Entity, Label)>, // for the hierarchy window
 }
 
+impl FrameData {
+    pub fn new(width: usize, height: usize) -> Self {
+        FrameData {
+            inspection_view: InspectionData {
+                entity: Entity::DANGLING,
+                xform: Transform::default(),
+                emitters: Vec::new(),
+            },
+            inspection_entities: Vec::new(),
+            agents: Vec::new(),
+            // signals: Vec::new(),
+            debug_info: DebugInfo::default(),
+            camera_xform: Transform::default(),
+            internal_res: Vec2::new(width as f32, height as f32),
+        }
+    }
+}
+
 //////////////////
 
 pub struct Engine {
