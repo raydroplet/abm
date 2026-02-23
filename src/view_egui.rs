@@ -819,6 +819,10 @@ impl ViewEGUI {
         // 5. Add back the camera position to get absolute world coords
         camera.position + relative_world
     }
+
+    fn render() {
+
+    }
 }
 
 impl eframe::App for ViewEGUI {

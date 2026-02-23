@@ -1,6 +1,7 @@
 // main.rs
 mod components;
 mod view_egui;
+mod view_macroquad;
 mod engine;
 mod gui;
 mod wave;

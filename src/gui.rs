@@ -3,6 +3,7 @@
 use crate::engine::{Engine, EngineCommand, FrameData};
 
 use crate::view_egui::ViewEGUI;
+use crate::view_macroquad::ViewMacroquad;
 pub use crossbeam_channel as crossbeam;
 use std::thread;
 
@@ -50,6 +51,7 @@ impl Producer {
     // Takes ownership of Engine and runs it in a background thread
     pub fn run_thread(mut self, mut engine: Engine) {
         thread::spawn(move || {
+            // NOTE: this acts as a while(true) when paused, which may not be ideal
             loop {
                 match self.command_receiver.try_recv() {
                     Ok(command) => match command {
@@ -123,6 +125,7 @@ pub struct Presenter {
     command_sender: crossbeam::Sender<Command>,
     // the renderer
     view_egui: ViewEGUI,
+    view_macroquad: ViewMacroquad,
 }
 
 impl Presenter {
@@ -154,6 +157,7 @@ impl Presenter {
             returner: frame_returner,
             command_sender: command_sender.clone(),
             view_egui: ViewEGUI::new(width, height, receive_frame, return_frame, command_sender),
+            view_macroquad: ViewMacroquad::new(width as u32, height as u32),
         }
     }
 
@@ -164,15 +168,16 @@ impl Presenter {
     ) -> Option<FrameData> {
         // gets the newest frame from the engine
         // replaces old one if not consumed
-        let mut frame_to_recycle = None;
+        let mut newest_frame = None;
         while let Ok(frame) = receiver.try_recv() {
-            if let Some(skipped_frame) = frame_to_recycle.replace(frame) {
+            if let Some(skipped_frame) = newest_frame.replace(frame) {
                 let _ = returner.send(skipped_frame);
             }
         }
 
         // cache the frame contents
-        // we may wish to draw the previous frame if a new one hasn't come yet
+        // we may wish to draw the previous frame if a new one isn't available
+        let mut frame_to_recycle = newest_frame;
         if let Some(new_frame) = frame_to_recycle {
             frame_to_recycle = current_frame.replace(new_frame);
         }
@@ -194,6 +199,7 @@ impl Presenter {
             let _ = self.returner.send(FrameData::new(width, height));
         }
 
-        let _ = self.view_egui.run();
+        // let _ = self.view_egui.run();
+        self.view_macroquad.run();
     }
 }

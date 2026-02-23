@@ -20,6 +20,7 @@ pkgs.mkShell {
     alsa-lib
     libpulseaudio
     pipewire
+    #
   ];
 
 shellHook = ''
@@ -27,6 +28,15 @@ shellHook = ''
     pkgs.wayland
     pkgs.libxkbcommon
     pkgs.libglvnd
+    # both of the two below needed to run the macroquad renderer.
+    # uncomment the others in case of future errors.
+    pkgs.xorg.libX11
+    pkgs.xorg.libXi
+    # pkgs.libGL
+    # pkgs.xorg.libXcursor
+    # pkgs.xorg.libXrandr
+    # pkgs.alsa-lib
+    # pkgs.libxkbcommon
   ]}:$LD_LIBRARY_PATH
 '';
 }
