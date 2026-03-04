@@ -16,12 +16,12 @@ use std::time::Duration;
 use std::time::Instant; // or f64::consts::TAU
 
 const FIXED_DT: f32 = 1.0 / 100.0; // Run physics exactly 100 times a second
-const BIT_AUDIO: usize = 3;
 
 const BIT_BOUNDING_VOLUME: usize = 0;
 const BIT_OCCLUDE: usize = 1;
 const BIT_COLLIDER: usize = 2;
-const BIT_PLAYER: usize = 3;
+const BIT_AUDIO: usize = 3;
+const BIT_PLAYER: usize = 4;
 
 #[derive(Clone, Copy, Debug)]
 pub struct AgentRenderData {
@@ -121,7 +121,7 @@ impl Engine {
             .expect("Failed to inialize kira audio manager");
 
         let camera_id = Self::spawn_camera(width, height, &mut world, &mut signal_field);
-        Self::spawn_dummy_entities(width, height, &mut world, &mut signal_field);
+        // Self::spawn_dummy_entities(width, height, &mut world, &mut signal_field);
         Self::spawn_audio_sources(width, height, &mut world, &mut manager, &mut signal_field);
         let (player_id, player_vision_id) = Self::spawn_dummy_player(&mut world, &mut signal_field);
         Self::spawn_wolf(vec2(300.0, 300.0), &mut world, &mut signal_field);
@@ -164,9 +164,9 @@ impl Engine {
     pub fn tick_once(&mut self) {
         let tick_start = Instant::now();
 
+        self.system_chase();
         self.system_physics_collisions();
         self.system_physics_bounce_on_edges();
-        self.system_chase();
         self.system_sync_spatial();
         self.system_audio_render();
 
@@ -209,6 +209,8 @@ impl Engine {
             self.world
                 .query_mut::<(&mut Transform, &mut Velocity, Option<&mut SpatialAnchor>)>()
         {
+            // apply linear velocity
+            //
             match anchor_opt {
                 Some(anchor) => {
                     anchor.position_offset += vel.linear * FIXED_DT;
@@ -1140,7 +1142,7 @@ impl Engine {
                     println!("Idle -- {:?}", vel.linear);
                 }
                 SeekerState::Chasing => {
-                    vel.linear = (xform.position - player_pos).normalize_or_zero();
+                    vel.linear = (player_pos - xform.position).normalize_or_zero() * 100.0;
                     println!("Chasing -- {:?}", vel.linear);
                 }
             }
