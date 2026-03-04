@@ -5,7 +5,7 @@ use crate::wave::{Mask, Signal, SignalField};
 use bitvec::prelude::*;
 use hecs::Entity;
 
-use glam::{vec2, Vec2};
+use glam::{Vec2, vec2};
 use hecs::World;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundSettings};
 use kira::{AudioManager, AudioManagerSettings, DefaultBackend, Tween};
@@ -48,6 +48,7 @@ pub enum EngineCommand {
     UpdateTransform(Entity, Transform),
     UpdateSignal(Entity, SignalEmitter),
     SelectEntity(Entity),
+    SpawnAudio(Vec2),
 }
 
 #[derive(Debug)]
@@ -122,9 +123,9 @@ impl Engine {
 
         let camera_id = Self::spawn_camera(width, height, &mut world, &mut signal_field);
         // Self::spawn_dummy_entities(width, height, &mut world, &mut signal_field);
-        Self::spawn_audio_sources(width, height, &mut world, &mut manager, &mut signal_field);
+        // Self::spawn_audio_sources(width, height, &mut world, /* &mut manager, */ &mut signal_field);
         let (player_id, player_vision_id) = Self::spawn_dummy_player(&mut world, &mut signal_field);
-        Self::spawn_wolf(vec2(300.0, 300.0), &mut world, &mut signal_field);
+        Self::spawn_wolf(vec2(0.0, 0.0), &mut world, &mut signal_field);
 
         Self {
             world,
@@ -165,15 +166,22 @@ impl Engine {
         let tick_start = Instant::now();
 
         self.system_chase();
+        self.system_fade_audio();
         self.system_physics_collisions();
         self.system_physics_bounce_on_edges();
         self.system_sync_spatial();
-        self.system_audio_render();
+        // self.system_audio_render();
 
         // Updates the Universal Field Engine with new physical positions
         for (id, (xform, emitter)) in self.world.query_mut::<(&Transform, &SignalEmitter)>() {
             self.signal_field
                 .reposition(id, xform.position, emitter.radius_max * xform.scale);
+            self.signal_field.reshape(
+                id,
+                xform.rotation,
+                emitter.cone_angle,
+                emitter.radius_min * xform.scale,
+            );
         }
 
         // 5. Update Counters & Metrics
@@ -205,19 +213,27 @@ impl Engine {
             }
         };
 
-        for (_id, (xform, vel, anchor_opt)) in
-            self.world
-                .query_mut::<(&mut Transform, &mut Velocity, Option<&mut SpatialAnchor>)>()
-        {
-            // apply linear velocity
-            //
+        for (_id, (xform, vel, anchor_opt, emitter)) in self.world.query_mut::<(
+            &mut Transform,
+            &mut Velocity,
+            Option<&mut SpatialAnchor>,
+            &SignalEmitter,
+        )>() {
             match anchor_opt {
                 Some(anchor) => {
+                    // apply linear velocity
                     anchor.position_offset += vel.linear * FIXED_DT;
+                    anchor.rotation_offset += vel.angular * FIXED_DT;
+                    anchor.scale_offset += vel.scalar * FIXED_DT;
                 }
                 None => {
                     xform.position += vel.linear * FIXED_DT;
+                    xform.rotation += vel.angular * FIXED_DT;
+                    xform.scale += vel.scalar * FIXED_DT;
 
+                    if !(emitter.emit_mask[BIT_COLLIDER]) {
+                        continue;
+                    }
                     // Bounce off camera edges
                     if xform.position.x >= right {
                         vel.linear.x = -vel.linear.x.abs();
@@ -241,38 +257,43 @@ impl Engine {
     }
 
     fn system_physics_collisions(&mut self) {
-        for (id, (xform, vel, emitter)) in
-            self.world
-                .query_mut::<(&mut Transform, &mut Velocity, &mut SignalEmitter)>()
+        for (id, (xform, emitter)) in self
+            .world
+            .query_mut::<(&mut Transform, &mut SignalEmitter)>()
         {
+            if !(emitter.emit_mask[BIT_COLLIDER]) {
+                continue;
+            }
+
             let my_radius = emitter.radius_max * xform.scale;
             self.signal_field.scan(id, |signal, key| {
-                if signal.emit_mask[BIT_COLLIDER] {
-                    // self check
-                    if id == key {
-                        return;
-                    }
-
-                    // A. Calculate Vector from Them -> To Me
-                    let delta = xform.position - signal.origin;
-                    // We need 'dist' to normalize the vector (direction)
-                    // We need 'dist' to calculate 'overlap' (strength)
-                    let dist = delta.length_squared().sqrt();
-
-                    //
-                    let normal = delta / dist.max(0.0001);
-                    let combined_radius = my_radius + signal.outer_radius;
-                    let overlap = combined_radius - dist;
-
-                    // Push
-                    xform.position += normal * overlap * 0.5;
-
-                    // // Slide (Velocity Kill)
-                    // let impact = vel.linear.dot(normal);
-                    // if impact < 0.0 {
-                    //     vel.linear *= normal * impact;
-                    // }
+                if !signal.emit_mask[BIT_COLLIDER] {
+                    return;
                 }
+
+                // self check
+                if id == key {
+                    return;
+                }
+
+                // A. Calculate Vector from Them -> To Me
+                let delta = xform.position - signal.origin;
+                // We need 'dist' to normalize the vector (direction)
+                // We need 'dist' to calculate 'overlap' (strength)
+                let dist = delta.length_squared().sqrt();
+
+                //
+                let normal = delta / dist.max(0.0001);
+                let combined_radius = my_radius + signal.outer_radius;
+                let overlap = combined_radius - dist;
+
+                // Push
+                xform.position += normal * overlap * 0.5;
+
+                // // Slide (Velocity Kill)
+                // let impact = vel.linear.dot(normal);
+                // if impact < 0.0 {
+                //     vel.linear *= normal * impact;
             });
         }
     }
@@ -283,14 +304,19 @@ impl Engine {
         // Pass 1: Read & Calc
         for (child_id, (anchor, _)) in self.world.query::<(&SpatialAnchor, &Transform)>().iter() {
             if let Ok(parent) = self.world.get::<&Transform>(anchor.parent) {
-                buffer.push((child_id, parent.position + anchor.position_offset));
+                buffer.push((
+                    child_id,
+                    parent.position + anchor.position_offset,
+                    parent.rotation + anchor.rotation_offset,
+                ));
             }
         }
 
         // Pass 2: Write
-        for (child_id, pos) in buffer.iter() {
+        for (child_id, pos, rot) in buffer.iter() {
             if let Ok(mut child) = self.world.get::<&mut Transform>(*child_id) {
                 child.position = *pos;
+                child.rotation = *rot;
             }
         }
     }
@@ -339,12 +365,12 @@ impl Engine {
                         let distance = listener_xform.position.distance(source_xform.position);
                         let attenuation = distance / audio_max_radius;
                         let volume = audio_source.base_volume + (attenuation * -30.0);
-                        println!(
-                            "(distance / audio_max_radius) -> {} / {} => {}",
-                            distance,
-                            audio_max_radius,
-                            distance / audio_max_radius
-                        );
+                        // println!(
+                        //     "(distance / audio_max_radius) -> {} / {} => {}",
+                        //     distance,
+                        //     audio_max_radius,
+                        //     distance / audio_max_radius
+                        // );
 
                         // Panning (Dot Product)
                         let dir =
@@ -358,7 +384,7 @@ impl Engine {
                         // (Already playing)
                         let _ = audio_source.handle.set_volume(volume, tween);
                         let _ = audio_source.handle.set_panning(pan, tween);
-                        println!("{:?}: volume {:.2}", audio_entity, volume);
+                        // println!("{:?}: volume {:.2}", audio_entity, volume);
                         //
                     }
                 }
@@ -419,7 +445,7 @@ impl Engine {
                     let data = AgentRenderData {
                         signal: *signal,
                         // color: [50, 50, 70, 40],
-                        color: [model.r / 4, model.g / 4, model.b / 4, 255],
+                        color: [model.r / 4, model.g / 4, model.b / 4, model.a],
                         label: None,
                     };
                     to_render.insert((*entity, signal.emit_mask), data);
@@ -705,21 +731,20 @@ impl Engine {
     }
 
     fn spawn_audio_sources(
-        width: f32,
-        height: f32,
+        pos: Vec2,
         world: &mut World,
-        audio_manager: &mut AudioManager,
+        // audio_manager: &mut Option<AudioManager>,
         signal_field: &mut SignalField,
     ) {
         let mut rng = rand::rng();
 
         for i in 0..1 {
-            let rand_pos_x = rng.random_range(width / 4.0..(width / 4.0) + (width / 2.0));
-            let rand_pos_y = rng.random_range(height / 4.0..(height / 4.0) + (height / 2.0));
-
-            let pos = Vec2::new(rand_pos_x, rand_pos_y);
-            let radius = 2.0;
-            let scale = 60.0;
+            // let rand_pos_x = rng.random_range(width / 4.0..(width / 4.0) + (width / 2.0));
+            // let rand_pos_y = rng.random_range(height / 4.0..(height / 4.0) + (height / 2.0));
+            //
+            // let pos = Vec2::new(rand_pos_x, rand_pos_y);
+            let radius = 1.0;
+            let scale = 0.0;
 
             let id = world.reserve_entity();
 
@@ -737,7 +762,7 @@ impl Engine {
             let angle = TAU;
             let emitter = SignalEmitter {
                 radius_max: radius,
-                radius_min: 0.0,
+                radius_min: /* radius - 0.2 */ 0.0,
                 cone_angle: angle,
                 emit_mask: signal_mask,
                 sense_mask: signal_mask,
@@ -747,22 +772,22 @@ impl Engine {
                 .expect("Failed to load audio file")
                 .volume(-100.0);
 
-            // 3. Play it
-            let handle = audio_manager
-                .play(sound_data.clone())
-                .expect("Failed to play audio");
-
-            let audio = AudioSourcePersistent {
-                // sound_data: sound_data,
-                handle: handle,
-                base_volume: 10.0,
-            };
+            // // 3. Play it
+            // let handle = audio_manager
+            //     .play(sound_data.clone())
+            //     .expect("Failed to play audio");
+            //
+            // let audio = AudioSourcePersistent {
+            //     // sound_data: sound_data,
+            //     handle: handle,
+            //     base_volume: 10.0,
+            // };
 
             let signal = Signal {
                 origin: pos,
                 unit_direction: Vec2::new(0.0, 0.0), // Rotation (irrelevant for sphere)
-                outer_radius: radius,                // Outer Radius
-                inner_radius: 0.0,
+                outer_radius: radius * scale,        // Outer Radius
+                inner_radius: /* (radius - 0.2) */0.0,
                 angle_radians: angle, // Cone Angle: 2*PI (Full Sphere)
                 emit_mask: signal_mask,
                 sense_mask: signal_mask,
@@ -780,9 +805,14 @@ impl Engine {
                         scale: scale,
                         ..Transform::default()
                     },
+                    Velocity {
+                        linear: vec2(0.0, 0.0),
+                        angular: 0.0,
+                        scalar: 250.0,
+                    },
                     model,
                     emitter,
-                    audio,
+                    Audio,
                 ),
             );
         }
@@ -901,6 +931,8 @@ impl Engine {
                 SpatialAnchor {
                     parent: player_id,
                     position_offset: Vec2::ZERO,
+                    rotation_offset: 0.0,
+                    scale_offset: 0.0,
                 },
                 Model {
                     r: 150,
@@ -979,6 +1011,9 @@ impl Engine {
             EngineCommand::SelectEntity(entity) => {
                 self.selected_entity = entity;
             }
+            EngineCommand::SpawnAudio(pos) => {
+                Self::spawn_audio_sources(pos, &mut self.world, &mut self.signal_field);
+            }
         }
     }
 
@@ -1022,9 +1057,9 @@ impl Engine {
 
         let seeker = Seeker {
             state: SeekerState::Idle,
-            // noise_direction: glam::vec2(0.0, 0.0),
+            target_source: glam::vec2(0.0, 0.0),
             vision_entity: vision_id,
-            // target: Entity::DANGLING,
+            target: Entity::DANGLING,
         };
 
         world.spawn_at(
@@ -1097,6 +1132,8 @@ impl Engine {
                 SpatialAnchor {
                     parent: wolf_id,
                     position_offset: glam::Vec2::ZERO,
+                    rotation_offset: 0.0,
+                    scale_offset: 0.0,
                 },
                 Model {
                     r: 200,
@@ -1113,9 +1150,9 @@ impl Engine {
 
     fn system_chase(&mut self) {
         // query all seeker components
-        for (wolf, (xform, vel, seeker)) in
-            self.world
-                .query_mut::<(&mut Transform, &mut Velocity, &mut Seeker)>()
+        for (wolf, (xform, vel, seeker)) in self
+            .world
+            .query_mut::<(&mut Transform, &mut Velocity, &mut Seeker)>()
         {
             ////////////////////
             // Player Chasing //
@@ -1123,29 +1160,145 @@ impl Engine {
 
             // everytime the wolf vision cones sees a player it locks it's target to it and starts
             // walking in it's direction.
-
-            seeker.state = SeekerState::Idle;
-            let mut player_pos: Vec2 = vec2(0.0, 0.0);
+            let mut player_found = false;
 
             self.signal_field.scan(seeker.vision_entity, |signal, key| {
+                // early return
+                if player_found {
+                    return;
+                };
+
                 if signal.emit_mask[BIT_PLAYER] {
-                    player_pos = signal.origin;
+                    seeker.target_source = signal.origin;
                     seeker.state = SeekerState::Chasing;
+                    player_found = true;
+                    return;
                 }
             });
+
+            if !player_found {
+                self.signal_field.scan(wolf, |signal, key| {
+                    // footstep hearing
+                    if signal.emit_mask[BIT_AUDIO] {
+                        // there are two cases which may happen
+                        // 1. this is the first time audio has been heard, just turn the view cone in
+                        //    the source direction, becoming alert
+                        // 2. this is the second time audio has been heard, start walking towards the
+                        //    source
+
+                        // case 1
+                        if seeker.target == Entity::DANGLING && seeker.state != SeekerState::Alert {
+                            seeker.state = SeekerState::Alert;
+                        }
+                        // case 2
+                        else if seeker.target != key {
+                            seeker.state = SeekerState::Seeking;
+                            seeker.target = key;
+                        }
+
+                        seeker.target = key;
+                        seeker.target_source = signal.origin;
+                    }
+                });
+            }
+
+            let mut rotate_function = || {
+                //////////////////
+                // 1. Get the direction vector to the audio source
+                let direction = seeker.target_source - xform.position;
+
+                // 2. Calculate the desired angle (in radians)
+                let target_angle = direction.y.atan2(direction.x);
+
+                // 3. Find the shortest angular difference (-PI to PI)
+                // Assuming xform.rotation is your current angle in radians
+                let mut angle_diff = target_angle - xform.rotation;
+                while angle_diff > std::f32::consts::PI {
+                    angle_diff -= 2.0 * std::f32::consts::PI;
+                }
+                while angle_diff < -std::f32::consts::PI {
+                    angle_diff += 2.0 * std::f32::consts::PI;
+                }
+
+                // 4. Apply angular velocity (multiplier controls turn speed)
+                let turn_speed = 5.0;
+                vel.angular = angle_diff * turn_speed;
+
+                // Optional: If angle_diff is very small (e.g., < 0.1), you could transition
+                // to Chasing or Idle depending on your game design.
+                //////////////////
+                println!("Alert -- {:?}, {:?}", vel.angular, angle_diff);
+            };
 
             // the wolf behavior is controlled by a state machine
             match seeker.state {
                 SeekerState::Idle => {
                     // stay still
                     vel.linear = vec2(0.0, 0.0);
+                    vel.angular = 0.0;
+                    seeker.target = Entity::DANGLING; // Reset target when idle
                     println!("Idle -- {:?}", vel.linear);
                 }
+                SeekerState::Alert => {
+                    vel.linear = vec2(0.0, 0.0);
+                    rotate_function();
+                }
+                SeekerState::Seeking => {
+                    let distance = seeker.target_source - xform.position;
+                    vel.linear = (distance).normalize_or_zero() * 100.0;
+                    rotate_function();
+
+                    if distance.length() < 10.0 {
+                        seeker.state = SeekerState::Idle;
+                    }
+
+                    if player_found {
+                        seeker.state = SeekerState::Chasing;
+                    }
+                }
                 SeekerState::Chasing => {
-                    vel.linear = (player_pos - xform.position).normalize_or_zero() * 100.0;
+                    vel.linear =
+                        (seeker.target_source - xform.position).normalize_or_zero() * 100.0;
+
+                    rotate_function();
+
+                    if !player_found {
+                        seeker.state = SeekerState::Idle;
+                    }
+
                     println!("Chasing -- {:?}", vel.linear);
                 }
             }
         }
     }
+
+fn system_fade_audio(&mut self) {
+    let mut to_despawn = Vec::new();
+    let max_scale = 800.0;
+
+    for (key, (_audio, xform, model)) in self
+        .world
+        .query_mut::<(&Audio, &Transform, &mut Model)>()
+    {
+        // 1. Calculate progress (0.0 at start, 1.0 at max_scale)
+        // This assumes your audio starts at a small scale (like 1.0 or 10.0)
+        let progress = xform.scale / max_scale;
+
+        // 2. Map progress to Alpha (255 down to 0)
+        let alpha = (1.0 - progress) * 255.0;
+
+        // 3. Apply and clamp
+        model.a = alpha.clamp(0.0, 255.0) as u8;
+
+        // 4. Despawn logic
+        if xform.scale >= max_scale || model.a == 0 {
+            self.signal_field.cease(key);
+            to_despawn.push(key);
+        }
+    }
+
+    for key in to_despawn {
+        let _ = self.world.despawn(key);
+    }
+}
 }

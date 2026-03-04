@@ -820,8 +820,29 @@ impl ViewEGUI {
         camera.position + relative_world
     }
 
-    fn render() {
+    fn spawn_audio_source(
+        ctx: &egui::Context,
+        frame: &mut FrameData,
+        command_channel: &mut crossbeam::Sender<Command>,
+    ) {
+        // let pos = glam::vec2(0.0, 0.0);
+        // let _ = command_channel.send(EngineCommand::SpawnAudio(pos).into());
+        //
+        //
+        // Only trigger if the click WASN't on an EGUI window
+        if ctx.input(|i| i.pointer.any_click()) && !ctx.is_pointer_over_area() {
+            if let Some(mouse_pos) = ctx.input(|i| i.pointer.interact_pos()) {
+                
+                // 1. Convert Screen Space -> World Space
+                let world_pos = Self::screen_to_world(mouse_pos, frame, ctx.viewport_rect());
 
+                // 2. Send the Command to the engine
+                // Assuming EngineCommand::SpawnSource or similar exists in your project
+                let _ = command_channel.send(
+                    EngineCommand::SpawnAudio(world_pos).into()
+                );
+            }
+        }
     }
 }
 
@@ -871,6 +892,9 @@ impl eframe::App for ViewEGUI {
                     self.selected_grid_level = closest;
                 }
             }
+
+            Self::spawn_audio_source(ctx, frame, &mut self.command_sender);
+
 
             // Render loop (Modifies frame.inspection_view)
             egui::CentralPanel::default()

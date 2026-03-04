@@ -26,7 +26,8 @@ impl Transform {
 #[derive(Default)]
 pub struct Velocity {
     pub linear: Vec2,
-    // pub angular: f32, // Radians per second (rotation speed)
+    pub angular: f32, // Radians per second (rotation speed)
+    pub scalar: f32,
 }
 
 pub struct Model {
@@ -52,6 +53,8 @@ pub struct SignalEmitter {
 pub struct SpatialAnchor {
     pub parent: hecs::Entity,
     pub position_offset: Vec2,
+    pub rotation_offset: f32,
+    pub scale_offset: f32,
 }
 
 // Points to parent
@@ -90,15 +93,18 @@ pub struct AudioListener {
 #[derive(PartialEq, Eq)]
 pub enum SeekerState {
     Idle,
+    Alert,
+    Seeking,
     Chasing,
 }
 
 pub struct Seeker {
     pub state: SeekerState,
-    // pub noise_direction: Vec2,
-    // pub target: Entity,
+    pub target_source: Vec2,
+    pub target: Entity,
     pub vision_entity: Entity,
 }
 
 // marker
 pub struct Wolf;
+pub struct Audio;
