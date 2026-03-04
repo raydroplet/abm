@@ -5,7 +5,7 @@ use crate::wave::{Mask, Signal, SignalField};
 use bitvec::prelude::*;
 use hecs::Entity;
 
-use glam::Vec2;
+use glam::{vec2, Vec2};
 use hecs::World;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundSettings};
 use kira::{AudioManager, AudioManagerSettings, DefaultBackend, Tween};
@@ -21,6 +21,7 @@ const BIT_AUDIO: usize = 3;
 const BIT_BOUNDING_VOLUME: usize = 0;
 const BIT_OCCLUDE: usize = 1;
 const BIT_COLLIDER: usize = 2;
+const BIT_PLAYER: usize = 3;
 
 #[derive(Clone, Copy, Debug)]
 pub struct AgentRenderData {
@@ -123,6 +124,7 @@ impl Engine {
         Self::spawn_dummy_entities(width, height, &mut world, &mut signal_field);
         Self::spawn_audio_sources(width, height, &mut world, &mut manager, &mut signal_field);
         let (player_id, player_vision_id) = Self::spawn_dummy_player(&mut world, &mut signal_field);
+        Self::spawn_wolf(vec2(300.0, 300.0), &mut world, &mut signal_field);
 
         Self {
             world,
@@ -164,6 +166,7 @@ impl Engine {
 
         self.system_physics_collisions();
         self.system_physics_bounce_on_edges();
+        self.system_chase();
         self.system_sync_spatial();
         self.system_audio_render();
 
@@ -802,6 +805,7 @@ impl Engine {
         let cone_angle = TAU;
         // let cone_angle = 2.094; // 120 degrees
 
+        signal_mask.set(BIT_PLAYER, true);
         let player_emitter = SignalEmitter {
             radius_max: outer_rad, // Base size
             radius_min: inner_rad, // Normalized inner (14/15)
@@ -819,6 +823,7 @@ impl Engine {
             emit_mask: signal_mask,
             sense_mask: signal_mask,
         };
+        signal_mask.set(BIT_PLAYER, false);
 
         signal_field.emit(player_signal, player_id);
 
@@ -971,6 +976,173 @@ impl Engine {
             }
             EngineCommand::SelectEntity(entity) => {
                 self.selected_entity = entity;
+            }
+        }
+    }
+
+    ////////////////////////////////////////////////////////////////
+
+    fn spawn_wolf(
+        position: Vec2,
+        world: &mut World,
+        signal_field: &mut SignalField,
+    ) -> (Entity, Entity) {
+        // =========================================================
+        // 1. THE WOLF BODY (Physics & Steering)
+        // =========================================================
+        let wolf_id = world.reserve_entity();
+        let vision_id = world.reserve_entity();
+
+        let body_radius = 3.0;
+        let mut body_mask = Mask::default();
+        body_mask.set(BIT_BOUNDING_VOLUME, true);
+        body_mask.set(BIT_COLLIDER, true);
+
+        let body_emitter = SignalEmitter {
+            radius_max: body_radius,
+            radius_min: 0.0,
+            cone_angle: std::f32::consts::TAU, // Full circle
+            emit_mask: body_mask,
+            sense_mask: body_mask,
+        };
+
+        let body_signal = Signal {
+            origin: position,
+            unit_direction: glam::vec2(0.0, 0.0),
+            outer_radius: body_radius,
+            inner_radius: 0.0,
+            angle_radians: std::f32::consts::TAU,
+            emit_mask: body_mask,
+            sense_mask: body_mask,
+        };
+
+        signal_field.emit(body_signal, wolf_id);
+
+        let seeker = Seeker {
+            state: SeekerState::Idle,
+            // noise_direction: glam::vec2(0.0, 0.0),
+            vision_entity: vision_id,
+            // target: Entity::DANGLING,
+        };
+
+        world.spawn_at(
+            wolf_id,
+            (
+                Label {
+                    name: "Wolf".to_string(),
+                },
+                Wolf,
+                Transform {
+                    position,
+                    rotation: 0.0,
+                    scale: 10.0,
+                },
+                Velocity::default(), // Needs velocity to move
+                Model {
+                    r: 10,
+                    g: 10,
+                    b: 200,
+                    a: 255,
+                },
+                body_emitter,
+                seeker,
+            ),
+        );
+
+        // =========================================================
+        // 2. THE WOLF VISION (Cone Sensor)
+        // =========================================================
+
+        let vision_range = 10.0;
+        let vision_scale = 30.0;
+        let cone_angle = std::f32::consts::TAU / 8.0;
+
+        let mut vision_mask = Mask::default();
+        vision_mask.set(BIT_BOUNDING_VOLUME, true);
+
+        let vision_emitter = SignalEmitter {
+            radius_max: vision_range,
+            radius_min: 0.0,
+            cone_angle,
+            emit_mask: vision_mask,
+            sense_mask: vision_mask,
+        };
+
+        let vision_signal = Signal {
+            origin: position,
+            unit_direction: glam::Vec2::X,
+            outer_radius: vision_range,
+            inner_radius: 0.0,
+            angle_radians: cone_angle,
+            emit_mask: vision_mask,
+            sense_mask: vision_mask,
+        };
+
+        signal_field.emit(vision_signal, vision_id);
+
+        world.spawn_at(
+            vision_id,
+            (
+                Label {
+                    name: "Wolf Vision".to_string(),
+                },
+                Transform {
+                    position,
+                    rotation: 0.0,
+                    scale: vision_scale,
+                },
+                Velocity::default(),
+                SpatialAnchor {
+                    parent: wolf_id,
+                    position_offset: glam::Vec2::ZERO,
+                },
+                Model {
+                    r: 200,
+                    g: 50,
+                    b: 200,
+                    a: 80,
+                }, // Red-ish transparent cone
+                vision_emitter,
+            ),
+        );
+
+        (wolf_id, vision_id)
+    }
+
+    fn system_chase(&mut self) {
+        // query all seeker components
+        for (wolf, (xform, vel, seeker)) in
+            self.world
+                .query_mut::<(&mut Transform, &mut Velocity, &mut Seeker)>()
+        {
+            ////////////////////
+            // Player Chasing //
+            ////////////////////
+
+            // everytime the wolf vision cones sees a player it locks it's target to it and starts
+            // walking in it's direction.
+
+            seeker.state = SeekerState::Idle;
+            let mut player_pos: Vec2 = vec2(0.0, 0.0);
+
+            self.signal_field.scan(seeker.vision_entity, |signal, key| {
+                if signal.emit_mask[BIT_PLAYER] {
+                    player_pos = signal.origin;
+                    seeker.state = SeekerState::Chasing;
+                }
+            });
+
+            // the wolf behavior is controlled by a state machine
+            match seeker.state {
+                SeekerState::Idle => {
+                    // stay still
+                    vel.linear = vec2(0.0, 0.0);
+                    println!("Idle -- {:?}", vel.linear);
+                }
+                SeekerState::Chasing => {
+                    vel.linear = (xform.position - player_pos).normalize_or_zero();
+                    println!("Chasing -- {:?}", vel.linear);
+                }
             }
         }
     }

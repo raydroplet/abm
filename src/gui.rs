@@ -199,7 +199,7 @@ impl Presenter {
             let _ = self.returner.send(FrameData::new(width, height));
         }
 
-        // let _ = self.view_egui.run();
-        self.view_macroquad.run();
+        let _ = self.view_egui.run();
+        // self.view_macroquad.run();
     }
 }

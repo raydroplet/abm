@@ -86,3 +86,19 @@ pub struct AudioSourceTransient {
 pub struct AudioListener {
     pub last_active_sources: Vec<Entity>,
 }
+
+#[derive(PartialEq, Eq)]
+pub enum SeekerState {
+    Idle,
+    Chasing,
+}
+
+pub struct Seeker {
+    pub state: SeekerState,
+    // pub noise_direction: Vec2,
+    // pub target: Entity,
+    pub vision_entity: Entity,
+}
+
+// marker
+pub struct Wolf;
