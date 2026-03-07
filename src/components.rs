@@ -1,6 +1,6 @@
 // components.rs
 
-use crate::wave::{Mask};
+use crate::field::{Mask};
 use glam::Vec2;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
 use hecs::{Entity};

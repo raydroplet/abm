@@ -1,7 +1,7 @@
 // engine.rs
 
 use crate::components::*;
-use crate::wave::{Mask, Signal, SignalField};
+use crate::field::{Mask, Signal, SignalField};
 use bitvec::prelude::*;
 use hecs::Entity;
 
@@ -51,13 +51,14 @@ pub enum EngineCommand {
     SpawnAudio(Vec2),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct InspectionData {
     pub entity: hecs::Entity,
     pub xform: Transform,
     pub emitters: Vec<SignalEmitter>,
 }
 
+#[derive(Clone)]
 pub struct FrameData {
     pub agents: Vec<AgentRenderData>, // The "Points" for the GPU
     pub debug_info: DebugInfo,
@@ -122,7 +123,7 @@ impl Engine {
             .expect("Failed to inialize kira audio manager");
 
         let camera_id = Self::spawn_camera(width, height, &mut world, &mut signal_field);
-        // Self::spawn_dummy_entities(width, height, &mut world, &mut signal_field);
+        Self::spawn_dummy_entities(width, height, &mut world, &mut signal_field);
         // Self::spawn_audio_sources(width, height, &mut world, /* &mut manager, */ &mut signal_field);
         let (player_id, player_vision_id) = Self::spawn_dummy_player(&mut world, &mut signal_field);
         Self::spawn_wolf(vec2(0.0, 0.0), &mut world, &mut signal_field);

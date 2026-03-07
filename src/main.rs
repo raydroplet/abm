@@ -1,33 +1,26 @@
 // main.rs
-mod components;
+mod app;
 mod view_egui;
 mod view_macroquad;
 mod engine;
-mod gui;
-mod wave;
+mod components;
+mod field;
 
 use crate::engine::Engine;
-use gui::{Presenter, Producer, crossbeam};
+use app::{Presenter, Producer, crossbeam};
 
 fn main() {
-    // 1. Channels (Capacity 2 is a sweet spot for double buffering)
-    // - producer_tx: Engine fills this
-    // - presenter_rx: Presenter reads this
+    // frame channel
     let (producer_tx, presenter_rx) = crossbeam::bounded(2);
-
-    // - presenter_tx: Presenter fills this (with empty frames)
-    // - producer_rx: Engine reads this
     let (presenter_tx, producer_rx) = crossbeam::bounded(2);
 
-    // // Command channel
+    // command channel
     let (command_tx, command_rx) = crossbeam::bounded(1);
 
-    // 2. Setup Classes
     let engine = Engine::new();
     let producer = Producer::new(producer_rx, producer_tx, command_rx);
     let presenter = Presenter::new(presenter_rx, presenter_tx, command_tx);
 
-    // 3. Execution
-    producer.run_thread(engine); // Spawns background thread
-    presenter.run() // Blocks main thread until window closes
+    producer.run_thread(engine); // spawns background thread
+    presenter.run() // blocks main thread until window closes
 }

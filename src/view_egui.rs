@@ -1,8 +1,8 @@
 // view_egui.rs
 
+use crate::app::{Command, ProducerCommand};
 use crate::engine::{EngineCommand, FrameData, InspectionData};
-use crate::gui::{Command, ProducerCommand};
-use crate::wave::{Mask, SignalField};
+use crate::field::{Mask, SignalField};
 use crossbeam_channel as crossbeam;
 use eframe::egui;
 use glam::Vec2;
@@ -19,8 +19,7 @@ pub struct ViewEGUI {
     viewport_size: glam::Vec2, // Store the size from the previous frame
     //
     // callbacks
-    receive_frame: Box<dyn Fn(&mut Option<FrameData>) -> Option<FrameData>>,
-    return_frame: Box<dyn Fn(Option<FrameData>)>,
+    receive_frame: Box<dyn Fn(&mut Option<FrameData>)>,
     command_sender: crossbeam::Sender<Command>,
 }
 
@@ -28,8 +27,7 @@ impl ViewEGUI {
     pub fn new(
         width: usize,
         height: usize,
-        receive_frame: impl Fn(&mut Option<FrameData>) -> Option<FrameData> + 'static,
-        return_frame: impl Fn(Option<FrameData>) + 'static,
+        receive_frame: impl Fn(&mut Option<FrameData>) + 'static,
         command_sender: crossbeam::Sender<Command>,
     ) -> Self {
         Self {
@@ -42,7 +40,6 @@ impl ViewEGUI {
             viewport_size: glam::Vec2::new(width as f32, height as f32),
             //
             receive_frame: Box::new(receive_frame),
-            return_frame: Box::new(return_frame),
             command_sender: command_sender,
         }
     }
@@ -832,15 +829,12 @@ impl ViewEGUI {
         // Only trigger if the click WASN't on an EGUI window
         if ctx.input(|i| i.pointer.any_click()) && !ctx.is_pointer_over_area() {
             if let Some(mouse_pos) = ctx.input(|i| i.pointer.interact_pos()) {
-                
                 // 1. Convert Screen Space -> World Space
                 let world_pos = Self::screen_to_world(mouse_pos, frame, ctx.viewport_rect());
 
                 // 2. Send the Command to the engine
                 // Assuming EngineCommand::SpawnSource or similar exists in your project
-                let _ = command_channel.send(
-                    EngineCommand::SpawnAudio(world_pos).into()
-                );
+                let _ = command_channel.send(EngineCommand::SpawnAudio(world_pos).into());
             }
         }
     }
@@ -864,9 +858,9 @@ impl eframe::App for ViewEGUI {
         }
 
         // receives a frame to be drawn
-        let frame_to_recycle = (self.receive_frame)(&mut self.current_frame);
+        (self.receive_frame)(&mut self.current_frame);
 
-        // rendering
+        // renders said frame, if valid
         if let Some(frame) = &mut self.current_frame {
             // UPS Calculation
             let time = ctx.input(|i| i.time);
@@ -895,7 +889,6 @@ impl eframe::App for ViewEGUI {
 
             Self::spawn_audio_source(ctx, frame, &mut self.command_sender);
 
-
             // Render loop (Modifies frame.inspection_view)
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(egui::Color32::from_rgb(12, 12, 12)))
@@ -923,7 +916,5 @@ impl eframe::App for ViewEGUI {
 
             ctx.request_repaint();
         }
-
-        (self.return_frame)(frame_to_recycle);
     }
 }

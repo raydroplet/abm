@@ -50,6 +50,7 @@ impl Producer {
 
     // Takes ownership of Engine and runs it in a background thread
     pub fn run_thread(mut self, mut engine: Engine) {
+        // TODO: improve this function
         thread::spawn(move || {
             // NOTE: this acts as a while(true) when paused, which may not be ideal
             loop {
@@ -114,18 +115,11 @@ impl Producer {
     }
 }
 
-// Small wrapper for the eframe::App trait
-//
-// Implements the update() method that queries a frame
-// and sends it to eframe to be presented on the window
-//
 pub struct Presenter {
-    receiver: crossbeam::Receiver<FrameData>,
     returner: crossbeam::Sender<FrameData>,
-    command_sender: crossbeam::Sender<Command>,
     // the renderer
     view_egui: ViewEGUI,
-    view_macroquad: ViewMacroquad,
+    _view_macroquad: ViewMacroquad,
 }
 
 impl Presenter {
@@ -140,24 +134,14 @@ impl Presenter {
             let receiver = frame_receiver.clone();
             let returner = frame_returner.clone();
             move |current_frame: &mut Option<FrameData>| {
-                Self::receive_frame(&receiver, &returner , current_frame)
-            }
-        };
-
-        let return_frame = {
-            let returner = frame_returner.clone();
-            move |frame: Option<FrameData>| {
-                Self::return_frame(&returner, frame);
+                Self::receive_frame(&receiver, &returner, current_frame);
             }
         };
 
         Self {
-            // thread communication
-            receiver: frame_receiver,
             returner: frame_returner,
-            command_sender: command_sender.clone(),
-            view_egui: ViewEGUI::new(width, height, receive_frame, return_frame, command_sender),
-            view_macroquad: ViewMacroquad::new(width as u32, height as u32),
+            view_egui: ViewEGUI::new(width, height, receive_frame, command_sender),
+            _view_macroquad: ViewMacroquad::new(width as u32, height as u32),
         }
     }
 
@@ -165,30 +149,22 @@ impl Presenter {
         receiver: &crossbeam::Receiver<FrameData>,
         returner: &crossbeam::Sender<FrameData>,
         current_frame: &mut Option<FrameData>,
-    ) -> Option<FrameData> {
+    ) {
         // gets the newest frame from the engine
         // replaces old one if not consumed
-        let mut newest_frame = None;
-        while let Ok(frame) = receiver.try_recv() {
-            if let Some(skipped_frame) = newest_frame.replace(frame) {
+        let mut received_frame = None;
+        while let Ok(frame_response) = receiver.try_recv() {
+            if let Some(skipped_frame) = received_frame.replace(frame_response) {
                 let _ = returner.send(skipped_frame);
             }
         }
 
-        // cache the frame contents
-        // we may wish to draw the previous frame if a new one isn't available
-        let mut frame_to_recycle = newest_frame;
-        if let Some(new_frame) = frame_to_recycle {
-            frame_to_recycle = current_frame.replace(new_frame);
-        }
-
-        frame_to_recycle
-    }
-
-    fn return_frame(returner: &crossbeam::Sender<FrameData>, frame: Option<FrameData>) {
-        // send the old buffer back to the engine
-        if let Some(old_buffer) = frame {
-            let _ = returner.send(old_buffer);
+        // cache the frame for rendering
+        // sends the old buffer back
+        if let Some(new_frame) = received_frame {
+            if let Some(old_frame) = current_frame.replace(new_frame) {
+                let _ = returner.send(old_frame);
+            }
         }
     }
 
@@ -200,6 +176,6 @@ impl Presenter {
         }
 
         let _ = self.view_egui.run();
-        // self.view_macroquad.run();
+        // self._view_macroquad.run();
     }
 }
