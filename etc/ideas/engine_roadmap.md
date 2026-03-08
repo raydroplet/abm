@@ -14,7 +14,7 @@
   - stress test
 - demo: particle bouncing
 
-### 0.3 (waves)
+### 0.3 ~~(waves)~~
 - features
   - wave propagation
   - influece fields
