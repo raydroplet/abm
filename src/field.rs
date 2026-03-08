@@ -9,9 +9,10 @@ const LEVEL_COUNT: usize = 64;
 pub type LevelCount = [u32; LEVEL_COUNT];
 pub type Mask = BitArray<[u64; 1]>;
 
-// can be swapped for u64 + entity.to_bits() latter to avoid coupling with hecs
-// kept like this for convenience and to remember what they key should actually be
-pub type SignalKey = hecs::Entity; // we will just use the generational hecs::Entity as the key
+// can be swapped for u64 + entity.to_bits() latter to avoid coupling with hecs.
+// kept like this for convenience and to remember what they key should actually be.
+// it is also generational, which is a requirement for it to work well.
+pub type SignalKey = hecs::Entity;
 
 #[derive(Hash, PartialEq, Eq, Clone, Copy, Debug)]
 pub struct TileKey {
@@ -25,7 +26,7 @@ pub struct TileKey {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Signal {
     // source
-    pub origin: Vec2, // !!!
+    pub origin: Vec2, // NOTE: consider using f64 instead of f32
     pub unit_direction: Vec2,
     // shape
     pub outer_radius: f32,
@@ -61,7 +62,6 @@ impl SignalField {
         self.store.insert(key, signal);
     }
 
-    // WARN: untested
     pub fn cease(&mut self, key: SignalKey) {
         if let Some(signal) = self.store.get(&key) {
             let tile_key = Self::get_coordinates(signal.outer_radius, signal.origin);
@@ -87,9 +87,9 @@ impl SignalField {
         let old_tile = Self::get_coordinates(signal.outer_radius, signal.origin);
         let new_tile = Self::get_coordinates(outer_radius, new_pos);
 
-        // update with new size/position in the 'store' (using the reference:w
-        signal.outer_radius = outer_radius;
+        // update with new size/position in the 'store' (using the reference)
         signal.origin = new_pos;
+        signal.outer_radius = outer_radius;
 
         // if the entity moved, but didn't cross a grid boundary, we are done
         if old_tile == new_tile {
@@ -124,6 +124,7 @@ impl SignalField {
         }
     }
 
+    #[allow(dead_code)]
     pub fn scan_point(
         &self,
         pos: Vec2,
@@ -201,9 +202,8 @@ impl SignalField {
 
         // broad phase: calculate a loose bounding box
         //
-        // optimizing the aabb of a rotated cone is more expensive.
-        // instead query the square AABB of the full (circle) radius.
-        // It over-selects tiles, the Narrow Phase filters them out.
+        // NOTE:
+        // this over-selects tiles for the cones.
         // A better bounding box algorithm may benefit in high range scenarios.
         //
         let min_aabb = signal.origin - Vec2::splat(signal.outer_radius);
@@ -531,17 +531,14 @@ impl SignalField {
         mask
     }
 
+    // NOTE: you likely wish to test this.
+    // it seems reasonable, but just to be sure.
     fn get_coordinates(outer_radius: f32, origin: Vec2) -> TileKey {
         let level = Self::get_level(outer_radius);
-
-        // calculate the actual size of a cell at this level
-        // level 0 = 1.0, level 1 = 2.0, level 2 = 4.0, etc
-        let cell_size = (1u64 << level) as f32;
-
-        // divide by cell_size and floor to find the grid index
-        // .floor() is critical to handle negative coordinates correctly
-        let gx = (origin.x / cell_size).floor() as i32;
-        let gy = (origin.y / cell_size).floor() as i32;
+        // floor() is critical to handle negative coordinates correctly.
+        // bit shift needed so the grids are aligned
+        let gx = (origin.x.floor() as i32) >> level;
+        let gy = (origin.y.floor() as i32) >> level;
 
         TileKey {
             level: level as u8,
@@ -563,6 +560,9 @@ impl SignalField {
 
     // returns the level of the smallest tile that can fit
     // 8 circles of this radius arranged in a 2x2 grid.
+    //
+    // this function is somewhat arbitrary, so you may wish to
+    // tweak it based on your specific application.
     pub fn get_level(radius: f32) -> usize {
         // The required tile diameter is 4 times the radius.
         let required_width = radius * 4.0;

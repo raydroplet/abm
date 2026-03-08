@@ -171,7 +171,7 @@ impl Engine {
         self.system_physics_collisions();
         self.system_physics_bounce_on_edges();
         self.system_sync_spatial();
-        // self.system_audio_render();
+        // self._system_audio_render();
 
         // Updates the Universal Field Engine with new physical positions
         for (id, (xform, emitter)) in self.world.query_mut::<(&Transform, &SignalEmitter)>() {
@@ -322,7 +322,7 @@ impl Engine {
         }
     }
 
-    fn system_audio_render(&mut self) {
+    fn _system_audio_render(&mut self) {
         //
         let mut query = self.world.query::<(&mut AudioListener, &Transform)>();
         let (listener_xform, last_active_sources, current_active_sources) = {
