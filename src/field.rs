@@ -65,10 +65,7 @@ impl SignalField {
     pub fn cease(&mut self, key: SignalKey) {
         if let Some(signal) = self.store.get(&key) {
             let tile_key = Self::get_coordinates(signal.outer_radius, signal.origin);
-            self.remove_from_grid(
-                key,
-                &tile_key,
-            );
+            self.remove_from_grid(key, &tile_key);
         }
 
         // remove from storage
@@ -100,10 +97,7 @@ impl SignalField {
         let emit_mask = signal.emit_mask;
 
         // clone the signal, since we are going to (re)move it from its old tile
-        self.remove_from_grid(
-            key,
-            &old_tile,
-        );
+        self.remove_from_grid(key, &old_tile);
 
         // add to grid (into its new tile)
         self.insert_into_grid(key, &new_tile, emit_mask);
@@ -531,8 +525,7 @@ impl SignalField {
         mask
     }
 
-    // NOTE: you likely wish to test this.
-    // it seems reasonable, but just to be sure.
+    // TODO: write test
     fn get_coordinates(outer_radius: f32, origin: Vec2) -> TileKey {
         let level = Self::get_level(outer_radius);
         // floor() is critical to handle negative coordinates correctly.
@@ -547,6 +540,7 @@ impl SignalField {
         }
     }
 
+    // TODO: write test
     pub fn get_tile_range(min_aabb: Vec2, max_aabb: Vec2, level: usize) -> (IVec2, IVec2) {
         let cell_size = Self::get_level_size(level);
 
@@ -563,21 +557,19 @@ impl SignalField {
     //
     // this function is somewhat arbitrary, so you may wish to
     // tweak it based on your specific application.
+    //
+    // TODO: write test
     pub fn get_level(radius: f32) -> usize {
-        // The required tile diameter is 4 times the radius.
+        debug_assert!(radius >= 0.0);
         let required_width = radius * 4.0;
-
-        if required_width <= 1.0 {
-            return 0;
-        }
-
-        // Smallest power of two that fits the required width
+        // smallest power of two that fits the required width.
+        // negative results from log2 saturate to 0 on cast (rust 1.45+).
         required_width.log2().ceil() as usize
     }
 
-    // Returns the tile square side dimension
+    // returns the tile square side dimension
     pub fn get_level_size(level: usize) -> f32 {
-        (2.0_f32).powi(level as i32)
+        (1_usize << level) as f32
     }
 
     pub fn get_level_mask(&self) -> Mask {

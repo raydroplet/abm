@@ -2,12 +2,14 @@
 
 use macroquad::prelude::*;
 
+#[allow(dead_code)]
 pub struct ViewMacroquad {
     camera_position: glam::Vec3,
     //
     screen_dimensions: glam::UVec2,
 }
 
+#[allow(dead_code, unused_variables)]
 impl ViewMacroquad {
     pub fn new(width: u32, height: u32) -> Self {
         Self {

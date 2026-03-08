@@ -8,6 +8,9 @@ use eframe::egui;
 use glam::Vec2;
 use hecs::Entity;
 
+// NOTE: I was going to clean up this file, but it's gui code and we can see it working.
+// won't bother.
+
 pub struct ViewEGUI {
     // UPS (Physics) Smoothing
     last_tick_count: u64,   // Snapshot of total ticks 0.5s ago

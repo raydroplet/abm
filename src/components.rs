@@ -1,16 +1,16 @@
 // components.rs
+#![allow(dead_code)] // WARN: remove this when convenient
 
 use crate::field::{Mask};
 use glam::Vec2;
-use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
+use kira::sound::static_sound::{StaticSoundHandle};
 use hecs::{Entity};
-use std::f32::consts::TAU;
 
 #[derive(Default, Clone, Copy, Debug)]
 pub struct Transform {
     pub position: Vec2,
     pub rotation: f32,
-    pub scale: f32, // should be Vec2, but not supported for now
+    pub scale: f32, // could be a Vec2. could also be bothersome to implement.
 }
 
 impl Transform {
@@ -57,12 +57,6 @@ pub struct SpatialAnchor {
     pub scale_offset: f32,
 }
 
-// Points to parent
-#[derive(Debug, Clone, Copy)]
-pub struct LifecycleAnchor {
-    pub parent: hecs::Entity,
-}
-
 #[derive(Debug, Clone)]
 pub struct Label {
     pub name: String,
@@ -72,23 +66,37 @@ pub struct Label {
 pub struct Camera {
     // pub level_mask: LevelMask,
     // pub signal_mask: SignalMask,
-    // pub zoom: f32,
 }
 
-// kira will keep the audio playing in the background even if there are no entities listenting
-// this engine aspect, and many others, can be a source of optimization, but for now it's fine
+// markers
+pub struct Wolf;
+pub struct Audio;
+
+
+//-//-//-//-//-//-//-//
+// WARN: experimental
+
+//// audio with kira
+
+pub struct AudioListener {
+    pub last_active_sources: Vec<Entity>,
+}
+
+// kira will keep the audio playing in the background even if there are no entities listenting.
+// this engine aspect, and many others, can be a source of optimization, but for now it's fine.
 pub struct AudioSourcePersistent {
     // pub sound_data: StaticSoundData,
     pub handle: StaticSoundHandle,
     pub base_volume: f32,
 }
 
-pub struct AudioSourceTransient {
+// Points to parent
+#[derive(Debug, Clone, Copy)]
+pub struct LifecycleAnchor {
+    pub parent: hecs::Entity,
 }
 
-pub struct AudioListener {
-    pub last_active_sources: Vec<Entity>,
-}
+//// wolf logic
 
 #[derive(PartialEq, Eq)]
 pub enum SeekerState {
@@ -105,6 +113,5 @@ pub struct Seeker {
     pub vision_entity: Entity,
 }
 
-// marker
-pub struct Wolf;
-pub struct Audio;
+//
+//-//-//-//-//-//-//-//
