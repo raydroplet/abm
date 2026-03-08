@@ -8,8 +8,9 @@ use eframe::egui;
 use glam::Vec2;
 use hecs::Entity;
 
-// NOTE: I was going to clean up this file, but it's gui code and we can see it working.
-// won't bother.
+// NOTE:
+// I was going to clean up this file, but it's gui code and we can see it working.
+// besides the update(), won't bother (for now).
 
 pub struct ViewEGUI {
     // UPS (Physics) Smoothing
@@ -845,9 +846,8 @@ impl ViewEGUI {
 
 impl eframe::App for ViewEGUI {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // handles resizes
+        // handles resizes. more understandable than simply activating mint
         let viewport = ctx.viewport_rect();
-        // more understandable than simply activating mint
         let new_size = glam::Vec2::new(viewport.size().x, viewport.size().y);
         if new_size != self.viewport_size {
             self.viewport_size = new_size;
@@ -865,7 +865,7 @@ impl eframe::App for ViewEGUI {
 
         // renders said frame, if valid
         if let Some(frame) = &mut self.current_frame {
-            // UPS Calculation
+            // ups calculation
             let time = ctx.input(|i| i.time);
             if time - self.last_measure_time >= 0.5 {
                 let current_total = frame.debug_info.tick_counter;
@@ -876,12 +876,11 @@ impl eframe::App for ViewEGUI {
                 self.last_measure_time = time;
             }
 
-            // Grid default
             let mask = frame.debug_info.active_levels_mask;
 
             // Only snap if the current level is no longer valid
             if !mask[self.selected_grid_level] {
-                // Find the closest active bit index
+                // find the closest active bit index
                 if let Some(closest) = mask
                     .iter_ones()
                     .min_by_key(|&bit| (bit as i32 - self.selected_grid_level as i32).abs())
@@ -892,12 +891,10 @@ impl eframe::App for ViewEGUI {
 
             Self::spawn_audio_source(ctx, frame, &mut self.command_sender);
 
-            // Render loop (Modifies frame.inspection_view)
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(egui::Color32::from_rgb(12, 12, 12)))
                 .show(ctx, |ui| {
                     let painter = ui.painter();
-                    // Self::render_waves(painter, frame);
                     Self::render_agents(painter, frame);
                     Self::render_grid(painter, frame, self.selected_grid_level);
                     Self::render_hierarchy_window(ctx, frame, &mut self.command_sender);
@@ -909,7 +906,7 @@ impl eframe::App for ViewEGUI {
                         &mut self.selected_grid_level,
                     );
 
-                    // This is where the frame data is modified
+                    // this is where the frame data is modified
                     Self::render_inspection_window(
                         ctx,
                         &mut frame.inspection_view,

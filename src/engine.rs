@@ -124,7 +124,7 @@ impl Engine {
 
         let camera_id = Self::spawn_camera(vec2(0.0, 0.0), &mut world, &mut signal_field);
         Self::spawn_dummy_entities(width, height, &mut world, &mut signal_field);
-        Self::spawn_dummy_player(&mut world, &mut signal_field);
+        Self::spawn_dummy_player(vec2(300.0, 300.0), &mut world, &mut signal_field);
         Self::spawn_wolf(vec2(0.0, 0.0), &mut world, &mut signal_field);
 
         Self {
@@ -318,6 +318,124 @@ impl Engine {
             }
         }
     }
+
+    fn system_chase(&mut self) {
+        // query all seeker components
+        for (wolf, (xform, vel, seeker)) in self
+            .world
+            .query_mut::<(&mut Transform, &mut Velocity, &mut Seeker)>()
+        {
+            // everytime the wolf vision cones sees a player it locks it's target to it and starts
+            // walking in it's direction.
+            let mut player_found = false;
+
+            self.signal_field
+                .scan(seeker.vision_entity, |signal, _key| {
+                    // early return
+                    if player_found {
+                        return;
+                    };
+
+                    if signal.emit_mask[Bit::Player as usize] {
+                        seeker.target_source = signal.origin;
+                        seeker.state = SeekerState::Chasing;
+                        player_found = true;
+                        return;
+                    }
+                });
+
+            if !player_found {
+                self.signal_field.scan(wolf, |signal, key| {
+                    // footstep hearing
+                    if signal.emit_mask[Bit::Audio as usize] {
+                        // there are two cases which may happen
+                        // 1. this is the first time audio has been heard, just turn the view cone in
+                        //    the source direction, becoming alert
+                        // 2. this is the second time audio has been heard, start walking towards the
+                        //    source
+
+                        // case 1
+                        if seeker.target == Entity::DANGLING && seeker.state != SeekerState::Alert {
+                            seeker.state = SeekerState::Alert;
+                        }
+                        // case 2
+                        else if seeker.target != key {
+                            seeker.state = SeekerState::Seeking;
+                            seeker.target = key;
+                        }
+
+                        seeker.target = key;
+                        seeker.target_source = signal.origin;
+                    }
+                });
+            }
+
+            let mut rotate_function = || {
+                // 1. get the direction vector to the audio source
+                let direction = seeker.target_source - xform.position;
+
+                // 2. calculate the desired angle (in radians)
+                let target_angle = direction.y.atan2(direction.x);
+
+                // 3. find the shortest angular difference (-pi to pi)
+                let mut angle_diff = target_angle - xform.rotation;
+                while angle_diff > std::f32::consts::PI {
+                    angle_diff -= 2.0 * std::f32::consts::PI;
+                }
+                while angle_diff < -std::f32::consts::PI {
+                    angle_diff += 2.0 * std::f32::consts::PI;
+                }
+
+                // 4. apply angular velocity (multiplier controls turn speed)
+                let turn_speed = 5.0;
+                vel.angular = angle_diff * turn_speed;
+            };
+
+            // the wolf behavior is controlled by a state machine
+            match seeker.state {
+                SeekerState::Idle => {
+                    // stay still
+                    vel.linear = vec2(0.0, 0.0);
+                    vel.angular = 0.0;
+                    seeker.target = Entity::DANGLING; // reset target when idle
+                    println!("Idle -- {:?}", vel.linear);
+                }
+                SeekerState::Alert => {
+                    vel.linear = vec2(0.0, 0.0);
+                    rotate_function();
+                    println!("Alert -- {:?}", vel.angular);
+                }
+                SeekerState::Seeking => {
+                    let distance = seeker.target_source - xform.position;
+                    vel.linear = (distance).normalize_or_zero() * 100.0;
+                    rotate_function();
+
+                    if distance.length() < 10.0 {
+                        seeker.state = SeekerState::Idle;
+                    }
+
+                    if player_found {
+                        seeker.state = SeekerState::Chasing;
+                    }
+
+                    println!("Seeeking -- {:?}", vel.angular);
+                }
+                SeekerState::Chasing => {
+                    vel.linear =
+                        (seeker.target_source - xform.position).normalize_or_zero() * 100.0;
+
+                    rotate_function();
+
+                    if !player_found {
+                        seeker.state = SeekerState::Idle;
+                    }
+
+                    println!("Chasing -- {:?}", vel.linear);
+                }
+            }
+        }
+    }
+
     pub fn render(&self, frame: &mut FrameData) {
         let start_render = Instant::now();
 
@@ -683,8 +801,7 @@ impl Engine {
         );
     }
 
-    fn spawn_dummy_player(world: &mut World, signal_field: &mut SignalField) {
-        let player_pos = vec2(512.0, 384.0);
+    fn spawn_dummy_player(position: Vec2, world: &mut World, signal_field: &mut SignalField) {
         let player_scale = 20.0;
 
         let player_id = world.reserve_entity();
@@ -708,7 +825,7 @@ impl Engine {
         };
 
         let player_signal = Signal {
-            origin: player_pos,
+            origin: position,
             unit_direction: direction,
             outer_radius: outer_rad * player_scale,
             inner_radius: inner_rad,
@@ -727,7 +844,7 @@ impl Engine {
                     name: String::from("Player"),
                 },
                 Transform {
-                    position: player_pos,
+                    position: position,
                     scale: player_scale,
                     rotation: direction.to_angle(),
                 },
@@ -758,7 +875,7 @@ impl Engine {
         };
 
         let child_signal = Signal {
-            origin: player_pos,
+            origin: position,
             unit_direction: direction,
             outer_radius: scanner_range * scale,
             inner_radius: 0.0,
@@ -776,7 +893,7 @@ impl Engine {
                     name: String::from("Vision"),
                 },
                 Transform {
-                    position: player_pos,
+                    position: position,
                     scale: scale,
                     rotation: direction.to_angle(),
                 },
@@ -795,75 +912,6 @@ impl Engine {
                 child_emitter,
             ),
         );
-    }
-
-    pub fn handle(&mut self, command: EngineCommand) {
-        match command {
-            EngineCommand::UpdateViewport(size) => {
-                self.viewport_size = size;
-            }
-            EngineCommand::UpdateTransform(entity, new_transform) => {
-                // update the transform (cache)
-                if let Ok(mut xform) = self.world.get::<&mut Transform>(entity) {
-                    *xform = new_transform;
-                }
-
-                // update the anchor
-                if let Ok(mut anchor) = self.world.get::<&mut SpatialAnchor>(entity) {
-                    if let Ok(parent_xform) = self.world.get::<&Transform>(anchor.parent) {
-                        anchor.position_offset = new_transform.position - parent_xform.position;
-                    }
-                }
-
-                if let Ok(mut query) = self
-                    .world
-                    .query_one::<(&mut Transform, &SignalEmitter)>(entity)
-                {
-                    if let Some((xform, emitter)) = query.get() {
-                        // update signal
-                        self.signal_field.reposition(
-                            entity,
-                            xform.position,
-                            emitter.radius_max * xform.scale,
-                        );
-                        self.signal_field.reshape(
-                            entity,
-                            xform.rotation,
-                            emitter.cone_angle,
-                            emitter.radius_min * xform.scale,
-                        );
-                    }
-                }
-            }
-            EngineCommand::UpdateSignal(entity, signal) => {
-                if let Ok(mut query) = self
-                    .world
-                    .query_one::<(&Transform, &mut SignalEmitter)>(entity)
-                {
-                    if let Some((xform, emitter)) = query.get() {
-                        // update signal
-                        *emitter = signal;
-                        self.signal_field.reposition(
-                            entity,
-                            xform.position,
-                            emitter.radius_max * xform.scale,
-                        );
-                        self.signal_field.reshape(
-                            entity,
-                            xform.rotation,
-                            emitter.cone_angle,
-                            emitter.radius_min * xform.scale,
-                        );
-                    }
-                }
-            }
-            EngineCommand::SelectEntity(entity) => {
-                self.selected_entity = entity;
-            }
-            EngineCommand::SpawnAudio(pos) => {
-                Self::spawn_audio(pos, &mut self.world, &mut self.signal_field);
-            }
-        }
     }
 
     fn spawn_wolf(
@@ -993,119 +1041,71 @@ impl Engine {
         (wolf_id, vision_id)
     }
 
-    fn system_chase(&mut self) {
-        // query all seeker components
-        for (wolf, (xform, vel, seeker)) in self
-            .world
-            .query_mut::<(&mut Transform, &mut Velocity, &mut Seeker)>()
-        {
-            // everytime the wolf vision cones sees a player it locks it's target to it and starts
-            // walking in it's direction.
-            let mut player_found = false;
-
-            self.signal_field
-                .scan(seeker.vision_entity, |signal, _key| {
-                    // early return
-                    if player_found {
-                        return;
-                    };
-
-                    if signal.emit_mask[Bit::Player as usize] {
-                        seeker.target_source = signal.origin;
-                        seeker.state = SeekerState::Chasing;
-                        player_found = true;
-                        return;
-                    }
-                });
-
-            if !player_found {
-                self.signal_field.scan(wolf, |signal, key| {
-                    // footstep hearing
-                    if signal.emit_mask[Bit::Audio as usize] {
-                        // there are two cases which may happen
-                        // 1. this is the first time audio has been heard, just turn the view cone in
-                        //    the source direction, becoming alert
-                        // 2. this is the second time audio has been heard, start walking towards the
-                        //    source
-
-                        // case 1
-                        if seeker.target == Entity::DANGLING && seeker.state != SeekerState::Alert {
-                            seeker.state = SeekerState::Alert;
-                        }
-                        // case 2
-                        else if seeker.target != key {
-                            seeker.state = SeekerState::Seeking;
-                            seeker.target = key;
-                        }
-
-                        seeker.target = key;
-                        seeker.target_source = signal.origin;
-                    }
-                });
+    pub fn handle(&mut self, command: EngineCommand) {
+        match command {
+            EngineCommand::UpdateViewport(size) => {
+                self.viewport_size = size;
             }
-
-            let mut rotate_function = || {
-                // 1. get the direction vector to the audio source
-                let direction = seeker.target_source - xform.position;
-
-                // 2. calculate the desired angle (in radians)
-                let target_angle = direction.y.atan2(direction.x);
-
-                // 3. find the shortest angular difference (-pi to pi)
-                let mut angle_diff = target_angle - xform.rotation;
-                while angle_diff > std::f32::consts::PI {
-                    angle_diff -= 2.0 * std::f32::consts::PI;
-                }
-                while angle_diff < -std::f32::consts::PI {
-                    angle_diff += 2.0 * std::f32::consts::PI;
+            EngineCommand::UpdateTransform(entity, new_transform) => {
+                // update the transform (cache)
+                if let Ok(mut xform) = self.world.get::<&mut Transform>(entity) {
+                    *xform = new_transform;
                 }
 
-                // 4. apply angular velocity (multiplier controls turn speed)
-                let turn_speed = 5.0;
-                vel.angular = angle_diff * turn_speed;
-            };
-
-            // the wolf behavior is controlled by a state machine
-            match seeker.state {
-                SeekerState::Idle => {
-                    // stay still
-                    vel.linear = vec2(0.0, 0.0);
-                    vel.angular = 0.0;
-                    seeker.target = Entity::DANGLING; // reset target when idle
-                    println!("Idle -- {:?}", vel.linear);
-                }
-                SeekerState::Alert => {
-                    vel.linear = vec2(0.0, 0.0);
-                    rotate_function();
-                    println!("Alert -- {:?}", vel.angular);
-                }
-                SeekerState::Seeking => {
-                    let distance = seeker.target_source - xform.position;
-                    vel.linear = (distance).normalize_or_zero() * 100.0;
-                    rotate_function();
-
-                    if distance.length() < 10.0 {
-                        seeker.state = SeekerState::Idle;
+                // update the anchor
+                if let Ok(mut anchor) = self.world.get::<&mut SpatialAnchor>(entity) {
+                    if let Ok(parent_xform) = self.world.get::<&Transform>(anchor.parent) {
+                        anchor.position_offset = new_transform.position - parent_xform.position;
                     }
-
-                    if player_found {
-                        seeker.state = SeekerState::Chasing;
-                    }
-
-                    println!("Seeeking -- {:?}", vel.angular);
                 }
-                SeekerState::Chasing => {
-                    vel.linear =
-                        (seeker.target_source - xform.position).normalize_or_zero() * 100.0;
 
-                    rotate_function();
-
-                    if !player_found {
-                        seeker.state = SeekerState::Idle;
+                if let Ok(mut query) = self
+                    .world
+                    .query_one::<(&mut Transform, &SignalEmitter)>(entity)
+                {
+                    if let Some((xform, emitter)) = query.get() {
+                        // update signal
+                        self.signal_field.reposition(
+                            entity,
+                            xform.position,
+                            emitter.radius_max * xform.scale,
+                        );
+                        self.signal_field.reshape(
+                            entity,
+                            xform.rotation,
+                            emitter.cone_angle,
+                            emitter.radius_min * xform.scale,
+                        );
                     }
-
-                    println!("Chasing -- {:?}", vel.linear);
                 }
+            }
+            EngineCommand::UpdateSignal(entity, signal) => {
+                if let Ok(mut query) = self
+                    .world
+                    .query_one::<(&Transform, &mut SignalEmitter)>(entity)
+                {
+                    if let Some((xform, emitter)) = query.get() {
+                        // update signal
+                        *emitter = signal;
+                        self.signal_field.reposition(
+                            entity,
+                            xform.position,
+                            emitter.radius_max * xform.scale,
+                        );
+                        self.signal_field.reshape(
+                            entity,
+                            xform.rotation,
+                            emitter.cone_angle,
+                            emitter.radius_min * xform.scale,
+                        );
+                    }
+                }
+            }
+            EngineCommand::SelectEntity(entity) => {
+                self.selected_entity = entity;
+            }
+            EngineCommand::SpawnAudio(pos) => {
+                Self::spawn_audio(pos, &mut self.world, &mut self.signal_field);
             }
         }
     }
